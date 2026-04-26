@@ -30,6 +30,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 shade-api = { path = "../shade-api" }
+shade-store = { path = "../shade-store" }
 
 [dev-dependencies]
 tempfile.workspace = true
