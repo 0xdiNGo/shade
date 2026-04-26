@@ -39,8 +39,23 @@ fn issue_cert(_node_id: &str, _ca_dir: &Path, _out_dir: &Path) -> Result<()> {
     bail!("`shade issue-cert` is not yet implemented")
 }
 
-fn migrate(_config: &Path) -> Result<()> {
-    bail!("`shade migrate` is not yet implemented; ships with shade-store")
+fn migrate(config_path: &Path) -> Result<()> {
+    let cfg =
+        Config::load(config_path).with_context(|| format!("loading {}", config_path.display()))?;
+    std::fs::create_dir_all(&cfg.node.data_dir)
+        .with_context(|| format!("creating {}", cfg.node.data_dir.display()))?;
+    let db_path = shade_store::db_path_in(&cfg.node.data_dir);
+    let store = shade_store::Store::open(&db_path)
+        .with_context(|| format!("opening {}", db_path.display()))?;
+    let report = store
+        .migrate()
+        .with_context(|| format!("running migrations on {}", db_path.display()))?;
+    println!(
+        "applied {} pending migration(s) to {}",
+        report.applied,
+        db_path.display()
+    );
+    Ok(())
 }
 
 fn check_config(config_path: &Path) -> Result<()> {

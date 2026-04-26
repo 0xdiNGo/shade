@@ -13,3 +13,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+r2d2.workspace = true
+r2d2_sqlite.workspace = true
+refinery.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

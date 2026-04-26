@@ -25,8 +25,26 @@ pub async fn run(cfg: Config) -> Result<()> {
         "starting shade"
     );
 
+    std::fs::create_dir_all(&cfg.node.data_dir)
+        .with_context(|| format!("creating {}", cfg.node.data_dir.display()))?;
+    let db_path = shade_store::db_path_in(&cfg.node.data_dir);
+    let store = shade_store::Store::open(&db_path)
+        .with_context(|| format!("opening {}", db_path.display()))?;
+    let report = store
+        .migrate()
+        .with_context(|| format!("migrating {}", db_path.display()))?;
+    store.probe().context("probing store")?;
+    tracing::info!(
+        db_path = %db_path.display(),
+        migrations_applied = report.applied,
+        "store opened"
+    );
+
     let admin_router = shade_api::admin::router(AdminState {
-        readiness: ReadinessProbes::default(),
+        readiness: ReadinessProbes {
+            store_open: true,
+            ..ReadinessProbes::default()
+        },
     });
     let metrics_router = shade_api::metrics::router(metrics_handle);
 
