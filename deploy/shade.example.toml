@@ -1,0 +1,38 @@
+# Example Shade configuration for local development via deploy/compose.yaml.
+#
+# Replace TLS material, mesh peers, and IRC credentials before running this
+# anywhere except a local container. The container expects its config bind-
+# mounted at /etc/shade/shade.toml; see compose.yaml for the wiring.
+
+[node]
+id = "shade-dev-01"
+data_dir = "/var/lib/shade"
+
+# These paths must point at real PEMs once mTLS lands in M4.
+[node.tls]
+ca_bundle = "/etc/shade/pki/botnet-ca.pem"
+cert      = "/etc/shade/pki/node.pem"
+key       = "/etc/shade/pki/node.key"
+
+[mesh]
+listen  = "0.0.0.0:7331"
+psk_env = "SHADE_MESH_PSK"
+peers   = []
+
+[network]
+name     = "dev"
+servers  = ["127.0.0.1:6697"]
+nick     = "shade-dev"
+ident    = "shade"
+realname = "Shade (dev)"
+
+[admin]
+listen    = "0.0.0.0:8443"
+client_ca = "/etc/shade/pki/admin-ca.pem"
+
+[metrics]
+listen = "0.0.0.0:9090"
+
+[logging]
+level  = "info"
+format = "json"

@@ -1,0 +1,10 @@
+.git
+.github
+target
+deploy/shade-data
+*.log
+*.db
+*.db-*
+.DS_Store
+.idea
+.vscode
