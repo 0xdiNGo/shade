@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::cli::{Cli, Command};
 use crate::config::Config;
+use crate::daemon;
 
 pub fn dispatch(cli: &Cli) -> Result<()> {
     match &cli.command {
@@ -20,8 +21,14 @@ pub fn dispatch(cli: &Cli) -> Result<()> {
     }
 }
 
-fn run(_config: &Path) -> Result<()> {
-    bail!("`shade run` is not yet implemented; a later PR wires up the daemon")
+fn run(config_path: &Path) -> Result<()> {
+    let cfg =
+        Config::load(config_path).with_context(|| format!("loading {}", config_path.display()))?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting tokio runtime")?;
+    runtime.block_on(daemon::run(cfg))
 }
 
 fn init_ca(_out_dir: &Path) -> Result<()> {
