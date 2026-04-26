@@ -1,0 +1,31 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local data / state
+/data/
+/dist/
+/tmp/
+*.log
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Secrets / certs (never commit)
+*.pem
+*.key
+*.crt
+*.p12
+.env
+.env.*
+!.env.example
