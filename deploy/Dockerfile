@@ -23,7 +23,7 @@ FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 LABEL org.opencontainers.image.title="shade"
 LABEL org.opencontainers.image.description="Modern IRC bot and channel-management mesh, written in Rust."
 LABEL org.opencontainers.image.source="https://github.com/0xdiNGo/shade"
-LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.authors="0xdiNGo"
 
 COPY --from=builder /shade/target/x86_64-unknown-linux-musl/release/shade /usr/local/bin/shade

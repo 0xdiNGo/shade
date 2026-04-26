@@ -10,4 +10,4 @@ Pre-alpha. Not yet usable. Not for production.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
