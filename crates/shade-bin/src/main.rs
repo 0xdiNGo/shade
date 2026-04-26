@@ -5,6 +5,8 @@ use clap::Parser;
 mod cli;
 mod commands;
 mod config;
+mod daemon;
+mod telemetry;
 
 fn main() -> ExitCode {
     let cli = cli::Cli::parse();
