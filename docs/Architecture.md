@@ -33,6 +33,26 @@ Cargo workspace at [github.com/0xdiNGo/shade](https://github.com/0xdiNGo/shade):
 
 Why we under-split: bdlib's micromodularity in Wraith is a cautionary tale. Each crate above earns its boundary; we do not have a `shade-flags` crate or a `shade-config` crate.
 
+## IRC client
+
+`shade-ircd` is a hand-rolled IRCv3 client. No external IRC framework: every layer was small enough to write directly, and every layer is unit-testable in isolation.
+
+Layers, bottom to top:
+
+| Module | Responsibility |
+|---|---|
+| `parser` | Zero-copy line parser. `Message<'a>` borrows from the input buffer; only `params` allocates. Handles tags, source, numerics, and trailing parameters. Property-tested via proptest; fuzzed in CI via cargo-fuzz. |
+| `connection` | TLS dial (rustls + webpki-roots, plus optional pinned roots), line framing, token-bucket rate limiter (~512 B / 2 s by default), exponential backoff reconnect. Surfaces `ConnectionEvent` (Connected / Line / Disconnected) and a cloneable `Writer` handle. |
+| `caps` | IRCv3 capability negotiation state machine. Pure: consumes `Message`, emits `CapAction`s. Drives `CAP LS 302` → `CAP REQ` → `CAP ACK`/`NAK` → done, including chunked-LS continuations. |
+| `sasl` | SASL PLAIN and EXTERNAL encoding. Splits payloads at the IRCv3 400-byte boundary; emits the trailing `AUTHENTICATE +` terminator if a chunk lands exactly on the boundary. |
+| `state` | In-memory `ServerState`: own nick, channels, members, modes, topics. Consumes parsed messages and emits high-level `StateEvent`s. Handles 001/005/332/333/353 numerics and JOIN/PART/QUIT/KICK/NICK/MODE/TOPIC commands. |
+| `mode_queue` | Outbound MODE batcher. Up to 6 modes per line, removes-before-adds within a batch, two parallel queues per channel (`Standard` and `Cookie`) so cookie-op handshakes never interleave with unrelated changes. Quick-priority preemption for time-sensitive flips. |
+| `session` | Async loop tying it all together. Runs the `CAP LS → NICK/USER → CAP REQ → SASL → CAP END → RPL_WELCOME → JOIN` registration sequence, replies to server `PING`, flushes the mode queue on a 250 ms tick, and emits `SessionEvent`s for the daemon to react to. Resets internal state on each reconnect. |
+
+Why hand-rolled: the parser is small, the state machine is small, and we want zero-copy parsing for line-rate processing without surprise allocations. The Wraith reference at `src/mod/server.mod/servmsg.cc` shows what a 4500-line monolithic dispatch table grows into; we'd rather pay the up-front cost for layered modules each under 600 lines.
+
+The `session` module exposes a `ReadyHandle` (an `Arc<AtomicBool>`-backed flag) that flips true on `RPL_WELCOME` and false on disconnect. The daemon shares the same atomic with `shade-api`'s `ReadinessProbes`, so `/readyz`'s `irc_connected` reflects live IRC state without needing a callback channel.
+
 ## Storage
 
 One SQLite file per node at `/var/lib/shade/shade.db`. WAL journal, `synchronous=NORMAL`, `foreign_keys=ON`. Schema is forward-only via [refinery](https://crates.io/crates/refinery); migration files live in `crates/shade-store/migrations/`.

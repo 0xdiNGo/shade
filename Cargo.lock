@@ -1698,6 +1698,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shade-api",
+ "shade-ircd",
  "shade-store",
  "tempfile",
  "thiserror 2.0.18",

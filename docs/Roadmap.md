@@ -5,8 +5,8 @@ Six milestones from scaffold to MVP demo. Each one closes with a runnable artifa
 | # | Scope | Status | Demoable artifact |
 |---|---|---|---|
 | **M1** | Workspace, CI, `shade run` boots, config, SQLite, migrations, `/healthz` `/readyz` `/metrics`, JSON logs, container image. | ✅ **DONE** | `docker run shade --version`; `curl /healthz` returns ok |
-| **M2** | `shade-ircd`: TLS+SASL, parser, IRCv3 caps, join channels, member state, rate-limited writes, reconnect with backoff. Mode queue exists, no policy yet. | ⏳ **NEXT** | Bot joins a channel on a real IRCD, replies to `!ping` |
-| **M3** | Domain + HTTP API: users, channels, flags, masks. `shadectl` CLI. Audit log. Single-node only. | pending | Create users via API, bot auto-ops `+o` users on join, kicks banned hosts |
+| **M2** | `shade-ircd`: TLS+SASL, parser, IRCv3 caps, join channels, member state, rate-limited writes, reconnect with backoff. Mode queue exists, no policy yet. | ✅ **DONE** | Bot joins a channel on a real IRCD, replies to `!ping` |
+| **M3** | Domain + HTTP API: users, channels, flags, masks. `shadectl` CLI. Audit log. Single-node only. | ⏳ **NEXT** | Create users via API, bot auto-ops `+o` users on join, kicks banned hosts |
 | **M4** | Mesh: mTLS listener, handshake, snapshot sync, delta gossip for users/channels/masks. | pending | 2 nodes, write to A, read from B, identical state in <100ms |
 | **M5** | Role distribution + cookie ops: `OpRequest`/`OpGrant` mesh messages, HMAC-SHA256 cookies, mass-op/deop detection. | pending | 2 nodes, one with ROLE_OP, the other requests op via mesh, cookie-verified op happens; tampered cookie rejected |
 | **M6** | MVP polish + Ansible role + container deployment: floods (subset), join-flood lockdown, autoop on join, chanset toggles, in-channel `/MSG TOKEN` admin commands. Integration tests against `ergo` in CI. | pending | Full smallest-slice scenario deployed by `ansible-playbook` against 3 VMs running containers |
