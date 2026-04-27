@@ -53,6 +53,23 @@ Why hand-rolled: the parser is small, the state machine is small, and we want ze
 
 The `session` module exposes a `ReadyHandle` (an `Arc<AtomicBool>`-backed flag) that flips true on `RPL_WELCOME` and false on disconnect. The daemon shares the same atomic with `shade-api`'s `ReadinessProbes`, so `/readyz`'s `irc_connected` reflects live IRC state without needing a callback channel.
 
+## Mesh implementation
+
+`shade-mesh` is one crate; the layers compose bottom to top.
+
+| Module | Responsibility |
+|---|---|
+| `codec` | Async length-prefixed MessagePack frame I/O (`u32 BE | payload`) over any `AsyncRead+AsyncWrite`. 1 MiB inbound size cap rejects oversize-announced frames before allocation. |
+| `tls` | rustls `ServerConfig` / `ClientConfig` builders sharing the botnet CA trust root. `cert_node_id(&CertificateDer)` extracts SAN-DNSName-then-CN; the handshake compares it to `PeerHello.node_id` to bind transport identity to application identity. |
+| `peer` | mTLS listener (`accept_peer`) + dialer (`dial_peer`) returning a `PeerStream` carrying the peer's claimed `node_id`. Dialer rejects on cert SAN mismatch. |
+| `handshake` | Symmetric `PeerHello` exchange. Validates frame shape, `proto_version`, and the identity-binding equality. |
+| `peer_loop` | Per-connection async task: sends our `SnapshotRequest`, replies to peer's `SnapshotRequest` with paged `SnapshotChunk`s, applies inbound `Upsert` / `Delete` via `shade_store::gossip`, drains an outbound `mpsc` from the hub onto the wire. |
+| `hub` | `MeshHub`: owns the listener task and one dialer task per configured peer (with exponential-backoff reconnect), maintains the `node_id → mpsc::Sender<Frame>` registry, broadcasts outbound frames, exposes `peers_up: Arc<AtomicBool>` for `/readyz`. |
+
+Operator commands `shade init-ca` and `shade issue-cert` (Ed25519 self-signed via rcgen) generate the bundle expected by `[node.tls]`. The daemon detects whether TLS material is on disk; if all three files exist it brings the mesh online, otherwise it logs a one-line warning and stays single-node — same M3 demo path keeps working unchanged.
+
+LWW gating lives at the SQL layer in the upsert paths (`ON CONFLICT DO UPDATE WHERE existing.updated_at < excluded.updated_at OR (=, lex-smaller-origin)`). Local writers don't carry the gate — they always win — so concurrent local writes within the same millisecond can't accidentally lose to themselves. Remote applies go through `shade_store::gossip::apply_*`, which carries the gate. Mask deletes leave a tombstone in `mask_tombstones`; an inbound mask `Upsert` consults the tombstone first, so deletes survive reorderings.
+
 ## Storage
 
 One SQLite file per node at `/var/lib/shade/shade.db`. WAL journal, `synchronous=NORMAL`, `foreign_keys=ON`. Schema is forward-only via [refinery](https://crates.io/crates/refinery); migration files live in `crates/shade-store/migrations/`.

@@ -162,14 +162,33 @@ pub(crate) mod test_pki {
             ];
             let signed = params.signed_by(&kp, &self.ca_rcgen, &ca_kp).unwrap();
             let cert_der = CertificateDer::from(signed.der().to_vec());
-            let key_der = PrivateKeyDer::Pkcs8(kp.serialize_der().into());
-            NodeCert { cert_der, key_der }
+            let key_bytes = kp.serialize_der();
+            let key_der = PrivateKeyDer::Pkcs8(key_bytes.clone().into());
+            NodeCert {
+                cert_der,
+                key_der,
+                key_bytes,
+            }
         }
     }
 
     pub struct NodeCert {
         pub cert_der: CertificateDer<'static>,
         pub key_der: PrivateKeyDer<'static>,
+        pub key_bytes: Vec<u8>,
+    }
+
+    impl NodeCert {
+        /// Make a cloned `(cert, key)` pair — `PrivateKeyDer` itself
+        /// isn't `Clone`. Lets a single issued cert be used for both
+        /// the server and client TLS configs of the same node in tests.
+        #[must_use]
+        pub fn pair(&self) -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
+            (
+                self.cert_der.clone(),
+                PrivateKeyDer::Pkcs8(self.key_bytes.clone().into()),
+            )
+        }
     }
 }
 

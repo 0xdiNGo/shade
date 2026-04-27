@@ -58,6 +58,8 @@ Update the relevant page in the same PR that introduces the architectural change
 
 **M3 ✅** — Domain + HTTP API + shadectl + auto-op/auto-kick. `shade-core` domain types (FlagSet/User/Channel/Mask/Role/AuditEntry). `shade-store` CRUD accessors with `match_by_host` for passive identification. `shade-api::v1` admin routes for users / channels / masks / audit, mTLS-pending. `shadectl` CLI talking to the admin API via ureq. Daemon's `apply_join_policy` kicks peers matching channel ban masks and auto-ops users with `+o` in their per-channel flag set.
 
-**M4 (next)** — see `docs/Roadmap.md`. mesh: mTLS listener, handshake, snapshot sync, delta gossip for users/channels/masks.
+**M4 ✅** — mTLS mesh + last-write-wins gossip. `shade-proto` mesh wire types (`Frame`, `PeerHello`, snapshot + upsert + delete envelopes). `shade-mesh` async length-prefixed frame codec, rustls-based listener + dialer, `PeerHello` handshake binding cert SAN to `node_id`, per-peer connection loop, `MeshHub` orchestrating accepts + dialers + broadcast fan-out. `shade-store::gossip` applies inbound `Upsert` / `Delete` under LWW, with mask delete tombstones (V0002 migration) so deletes survive reorderings. `shade init-ca` / `shade issue-cert` ship Ed25519 self-signed CA + node certs. Daemon spawns the hub when TLS material is on disk; `/readyz`'s `peers_up` mirrors the live atom.
 
-**M5–M6** — see `docs/Roadmap.md`.
+**M5 (next)** — see `docs/Roadmap.md`. role distribution + cookie ops: deterministic `roleidx % botcount` rotation, HMAC-SHA256 cookies for cross-bot op handshakes, mass-op/deop detection.
+
+**M6** — see `docs/Roadmap.md`.
