@@ -52,6 +52,5 @@ The IRC server is **not trusted for op authority**. It is trusted to deliver mes
 |---|---|---|
 | Argon2id-backed `POST /v1/login` | Token issuance for operators without cert distribution. | Roadmap § Out of MVP scope |
 | In-channel `/MSG TOKEN` flow | Operator UX promised in [Architecture § Authentication](Architecture.md#authentication). | Roadmap § Out of MVP scope |
-| Mass-op response that acts | Today the alarm only logs `warn`; auto-deop / lockdown is open work. | Roadmap § Out of MVP scope |
 | Cert revocation list / OCSP | Lost admin or node certs still require CA rotation. | v0.2 |
 | Formal external review | We've reviewed our own code; that is not the same thing. | When the project graduates beyond pre-alpha. |
