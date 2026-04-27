@@ -1,0 +1,1 @@
+:server CAP * LS :sasl server-time multi-prefix extended-join

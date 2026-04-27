@@ -1,0 +1,24 @@
+[package]
+name = "shade-fuzz"
+version = "0.0.0"
+description = "Fuzz harnesses for Shade. Not part of the main workspace."
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+shade-ircd = { path = "../crates/shade-ircd" }
+
+[[bin]]
+name = "irc_parser"
+path = "fuzz_targets/irc_parser.rs"
+test = false
+doc = false
+bench = false
+
+# Standalone workspace so the unstable nightly fuzzing toolchain doesn't
+# leak into the main project's Cargo.lock.
+[workspace]

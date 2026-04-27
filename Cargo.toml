@@ -9,6 +9,9 @@ members = [
     "crates/shade-store",
     "crates/shade-bin",
 ]
+# `fuzz/` has its own [workspace] root and a nightly toolchain dep
+# (libfuzzer-sys); keep it out of the main workspace.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.0"
