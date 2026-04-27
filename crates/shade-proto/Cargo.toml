@@ -13,3 +13,11 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+rmp-serde.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+shade-core = { path = "../shade-core" }
+
+[dev-dependencies]
+serde_json.workspace = true
