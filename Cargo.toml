@@ -27,6 +27,7 @@ publish = false
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "signal", "time", "net", "sync", "io-util"] }
 tokio-rustls = "0.26"
 rustls = "0.23"
+webpki-roots = "0.26"
 
 # HTTP
 axum = "0.7"

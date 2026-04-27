@@ -13,7 +13,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+rustls.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
