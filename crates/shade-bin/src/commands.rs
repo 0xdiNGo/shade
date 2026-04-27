@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use crate::cli::{Cli, Command};
 use crate::config::Config;
 use crate::daemon;
+use crate::shadectl;
 
 pub fn dispatch(cli: &Cli) -> Result<()> {
     match &cli.command {
@@ -18,6 +19,21 @@ pub fn dispatch(cli: &Cli) -> Result<()> {
         Command::Migrate => migrate(&cli.config),
         Command::CheckConfig => check_config(&cli.config),
         Command::DumpState => dump_state(&cli.config),
+        Command::Users(sub) => shadectl::users(sub, &cli.config),
+        Command::Channels(sub) => shadectl::channels(sub, &cli.config),
+        Command::Chanset(sub) => shadectl::chanset(sub, &cli.config),
+        Command::Chattr {
+            handle,
+            channel,
+            diff,
+            client,
+        } => shadectl::chattr_channel(handle, channel, diff, client, &cli.config),
+        Command::Mask(sub) => shadectl::mask(sub, &cli.config),
+        Command::Audit {
+            limit,
+            actor,
+            client,
+        } => shadectl::audit(*limit, actor.as_deref(), client, &cli.config),
     }
 }
 
