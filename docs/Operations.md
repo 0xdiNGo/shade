@@ -243,8 +243,12 @@ There's a brief window during the rolling rotation where some nodes have the old
 #### Drain a node before maintenance
 
 ```sh
-# 1. Stop the daemon — peers detect the disconnect within ~1s and
-#    rebalance roles among the remaining set.
+# 1. Stop the daemon — SIGTERM triggers the graceful-shutdown path:
+#    the admin and metrics listeners stop accepting new connections
+#    and drain in-flight requests, the IRC session sends
+#    QUIT :shade shutting down with a 250 ms flush window, and the
+#    mesh hub stops accepting new peer dials. The runtime waits up to
+#    10 s total for everything to drain, then aborts whatever remains.
 systemctl stop shade
 
 # 2. Do the maintenance work (kernel upgrade, hardware swap, ...).
@@ -256,6 +260,8 @@ systemctl start shade
 ```
 
 The peer's snapshot exchange catches up the returning node before any new gossip is applied — same code path as a fresh boot.
+
+The systemd unit's default `TimeoutStopSec` (90 s on most distros) is comfortably longer than the daemon's 10 s drain budget, so a graceful stop will normally complete inside ~1 s and never hit the systemd hard kill.
 
 #### Recover from a partition
 

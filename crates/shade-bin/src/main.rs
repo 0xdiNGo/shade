@@ -10,6 +10,7 @@ mod daemon;
 mod op_observer;
 mod pki;
 mod shadectl;
+mod shutdown;
 mod telemetry;
 
 fn main() -> ExitCode {
