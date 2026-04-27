@@ -59,6 +59,11 @@ thiserror = "2"
 # Encoding
 base64 = "0.22"
 
+# Cookie-op crypto: HKDF-SHA256 key derivation + HMAC-SHA256 tagging
+hmac = "0.12"
+sha2 = "0.10"
+hkdf = "0.12"
+
 # PKI: self-signed CA + node cert generation, peer cert SAN parsing
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring", "x509-parser"] }
 x509-parser = "0.16"
