@@ -8,6 +8,15 @@ Successor to Wraith. Same bot family — encrypted node-to-node mesh, distribute
 
 Pre-alpha. Not yet usable. Not for production.
 
+## Documentation
+
+Project docs live in [`docs/`](docs/README.md). Highlights:
+
+- [Architecture](docs/Architecture.md) — design overview
+- [Improvements Over Wraith](docs/Improvements-Over-Wraith.md) — punchy, cited critique
+- [Roadmap](docs/Roadmap.md) — milestones and status
+- [Development](docs/Development.md) — local setup, CI, PR conventions
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
