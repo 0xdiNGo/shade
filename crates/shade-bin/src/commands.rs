@@ -17,6 +17,11 @@ pub fn dispatch(cli: &Cli) -> Result<()> {
             ca_dir,
             out_dir,
         } => issue_cert(node_id, ca_dir, out_dir),
+        Command::IssueAdminCert {
+            handle,
+            ca_dir,
+            out_dir,
+        } => issue_admin_cert(handle, ca_dir, out_dir),
         Command::Migrate => migrate(&cli.config),
         Command::CheckConfig => check_config(&cli.config),
         Command::DumpState => dump_state(&cli.config),
@@ -54,6 +59,10 @@ fn init_ca(out_dir: &Path) -> Result<()> {
 
 fn issue_cert(node_id: &str, ca_dir: &Path, out_dir: &Path) -> Result<()> {
     pki::issue_cert(node_id, ca_dir, out_dir)
+}
+
+fn issue_admin_cert(handle: &str, ca_dir: &Path, out_dir: &Path) -> Result<()> {
+    pki::issue_admin_cert(handle, ca_dir, out_dir)
 }
 
 fn migrate(config_path: &Path) -> Result<()> {

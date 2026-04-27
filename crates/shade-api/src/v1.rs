@@ -1,10 +1,14 @@
 //! `/v1` admin API: users, channels, masks, audit.
 //!
-//! mTLS authentication isn't enforced here — that's the listener's job
-//! (M3.5 / M4 once cert verification ships). Until then, the actor for
-//! audit purposes is taken from the `X-Actor` request header, defaulting
-//! to the node ID. Production deployments **must** front this with mTLS;
-//! the API does not authenticate by itself.
+//! Authentication is mTLS, enforced by the admin listener in `shade-bin`:
+//! the TLS accept loop verifies the client cert chain against the
+//! configured operator CA, then injects the cert subject CN as a
+//! [`crate::auth::VerifiedActor`] into the request extensions. Routes pull
+//! the resolved identity out via the [`ActorClaim`] extractor.
+//!
+//! For tests and the dev-only no-TLS path, [`ActorClaim`] falls back to
+//! the `X-Actor` request header and finally to the node ID. Production
+//! deployments must run with `admin.require_mtls = true`.
 //!
 //! Each mutation writes one [`shade_core::AuditEntry`] before returning.
 //! The audit row is best-effort: a failure to insert it logs but does not
@@ -14,7 +18,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::{delete, get, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -25,6 +29,8 @@ use shade_core::{
 use shade_mesh::MeshHub;
 use shade_proto::{Delete, DeleteKind, Upsert, UpsertKind};
 use shade_store::Store;
+
+use crate::auth::ActorClaim;
 
 /// Shared state for the admin API.
 #[derive(Clone)]
@@ -135,24 +141,16 @@ struct ErrorBody {
 
 // ----- audit helpers ------------------------------------------------------
 
-fn actor(headers: &HeaderMap, fallback: &str) -> String {
-    headers
-        .get("x-actor")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map_or_else(|| fallback.to_owned(), str::to_owned)
-}
-
 fn audit(
     state: &ApiState,
-    headers: &HeaderMap,
+    claim: &ActorClaim,
     action: &str,
     target: Option<&str>,
     details: &serde_json::Value,
 ) {
     let mut entry = AuditEntry::new(
         shade_core::now_ms(),
-        actor(headers, &state.node_id),
+        claim.resolve_owned(&state.node_id),
         action,
         AuditSource::Api,
     )
@@ -174,7 +172,7 @@ async fn list_users(State(state): State<ApiState>) -> Result<Json<Vec<User>>, Ap
 
 async fn create_user(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    claim: ActorClaim,
     Json(body): Json<NewUser>,
 ) -> Result<(StatusCode, Json<User>), ApiError> {
     if body.handle.trim().is_empty() {
@@ -183,7 +181,7 @@ async fn create_user(
     let user = shade_store::users::upsert(&state.store, &body, &state.node_id)?;
     audit(
         &state,
-        &headers,
+        &claim,
         "user.upsert",
         Some(&user.handle),
         &serde_json::json!({ "id": user.id.to_string() }),
@@ -225,7 +223,7 @@ struct UserPatch {
 
 async fn patch_user(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    claim: ActorClaim,
     Path(handle): Path<String>,
     Json(patch): Json<UserPatch>,
 ) -> Result<Json<User>, ApiError> {
@@ -274,7 +272,7 @@ async fn patch_user(
     let updated = shade_store::users::upsert(&state.store, &nu, &state.node_id)?;
     audit(
         &state,
-        &headers,
+        &claim,
         "user.update",
         Some(&updated.handle),
         &serde_json::json!({ "id": updated.id.to_string() }),
@@ -287,7 +285,7 @@ async fn patch_user(
 
 async fn delete_user(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    claim: ActorClaim,
     Path(handle): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let user =
@@ -298,7 +296,7 @@ async fn delete_user(
     }
     audit(
         &state,
-        &headers,
+        &claim,
         "user.delete",
         Some(&user.handle),
         &serde_json::json!({ "id": user.id.to_string() }),
@@ -317,7 +315,7 @@ async fn list_channels(State(state): State<ApiState>) -> Result<Json<Vec<Channel
 
 async fn create_channel(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    claim: ActorClaim,
     Json(body): Json<NewChannel>,
 ) -> Result<(StatusCode, Json<Channel>), ApiError> {
     if !body.name.starts_with('#') && !body.name.starts_with('&') {
@@ -328,7 +326,7 @@ async fn create_channel(
     let chan = shade_store::channels::upsert(&state.store, &body, &state.node_id)?;
     audit(
         &state,
-        &headers,
+        &claim,
         "channel.upsert",
         Some(&chan.name),
         &serde_json::json!({ "id": chan.id.to_string() }),
@@ -350,7 +348,7 @@ async fn get_channel(
 
 async fn delete_channel(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    claim: ActorClaim,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let chan =
@@ -361,7 +359,7 @@ async fn delete_channel(
     }
     audit(
         &state,
-        &headers,
+        &claim,
         "channel.delete",
         Some(&chan.name),
         &serde_json::json!({ "id": chan.id.to_string() }),
@@ -404,7 +402,7 @@ struct SettingsBody {
 
 async fn put_channel_settings(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    claim: ActorClaim,
     Path(name): Path<String>,
     Json(body): Json<SettingsBody>,
 ) -> Result<Json<ChannelSettings>, ApiError> {
@@ -445,7 +443,7 @@ async fn put_channel_settings(
     let written = shade_store::channels::upsert_settings(&state.store, &settings, &state.node_id)?;
     audit(
         &state,
-        &headers,
+        &claim,
         "channel.settings.update",
         Some(&chan.name),
         &serde_json::json!({ "flags": written.flags.to_string() }),
@@ -471,7 +469,7 @@ struct UserFlagsBody {
 
 async fn put_channel_user_flags(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    claim: ActorClaim,
     Path((name, handle)): Path<(String, String)>,
     Json(body): Json<UserFlagsBody>,
 ) -> Result<Json<ChannelUserFlags>, ApiError> {
@@ -505,7 +503,7 @@ async fn put_channel_user_flags(
     )?;
     audit(
         &state,
-        &headers,
+        &claim,
         "channel.user_flags.update",
         Some(&format!("{}:{}", chan.name, user.handle)),
         &serde_json::json!({ "flags": row.flags.to_string() }),
@@ -518,7 +516,7 @@ async fn put_channel_user_flags(
 
 async fn delete_channel_user_flags(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    claim: ActorClaim,
     Path((name, handle)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let chan =
@@ -531,7 +529,7 @@ async fn delete_channel_user_flags(
     }
     audit(
         &state,
-        &headers,
+        &claim,
         "channel.user_flags.delete",
         Some(&format!("{}:{}", chan.name, user.handle)),
         &serde_json::Value::Null,
@@ -585,7 +583,7 @@ struct CreateChannelMaskBody {
 
 async fn create_channel_mask(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    claim: ActorClaim,
     Path(name): Path<String>,
     Json(body): Json<CreateChannelMaskBody>,
 ) -> Result<(StatusCode, Json<Mask>), ApiError> {
@@ -601,14 +599,14 @@ async fn create_channel_mask(
         reason: body.reason,
         set_by: body
             .set_by
-            .or_else(|| Some(actor(&headers, &state.node_id))),
+            .or_else(|| Some(claim.resolve_owned(&state.node_id))),
         expires_at: body.expires_at,
         sticky: body.sticky,
     };
     let written = shade_store::masks::insert(&state.store, &nm, &state.node_id)?;
     audit(
         &state,
-        &headers,
+        &claim,
         "mask.add",
         Some(&format!("{}:{}", chan.name, written.mask)),
         &serde_json::json!({ "id": written.id.0.to_string(), "kind": written.kind }),
@@ -621,7 +619,7 @@ async fn create_channel_mask(
 
 async fn delete_mask(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    claim: ActorClaim,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let parsed = ulid::Ulid::from_string(&id)
@@ -634,7 +632,7 @@ async fn delete_mask(
     }
     audit(
         &state,
-        &headers,
+        &claim,
         "mask.delete",
         Some(&mask.mask),
         &serde_json::json!({ "id": id, "kind": mask.kind }),

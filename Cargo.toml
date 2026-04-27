@@ -25,8 +25,8 @@ publish = false
 [workspace.dependencies]
 # Core async + TLS
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "signal", "time", "net", "sync", "io-util"] }
-tokio-rustls = "0.26"
-rustls = "0.23"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "tls12", "std"] }
 webpki-roots = "0.26"
 
 # HTTP
@@ -35,6 +35,8 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "request-id"] }
 http = "1"
 http-body-util = "0.1"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service", "http1"] }
 
 # Serde + framing
 serde = { version = "1", features = ["derive"] }
@@ -68,8 +70,9 @@ hkdf = "0.12"
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring", "x509-parser"] }
 x509-parser = "0.16"
 
-# HTTP client for shadectl
-ureq = { version = "2.10", features = ["json"], default-features = false }
+# HTTP client for shadectl. `tls` enables rustls so shadectl can present
+# an admin client cert to the daemon's mTLS listener.
+ureq = { version = "2.12", features = ["json", "tls"], default-features = false }
 
 # Utilities
 ulid = { version = "1", features = ["serde"] }

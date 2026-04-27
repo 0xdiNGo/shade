@@ -31,7 +31,17 @@ channels = ["#shade-test"]
 
 [admin]
 listen    = "0.0.0.0:8443"
-client_ca = "/etc/shade/pki/admin-ca.pem"
+# Production: mTLS is required. The CA at `client_ca` signs operator
+# admin client certs (issued via `shade issue-admin-cert --handle ...`);
+# the cert Subject CN is the audit actor for every request.
+# Set `require_mtls = false` only for tests / the docker-compose demo,
+# where the listener serves plain HTTP and reads the actor from the
+# `X-Actor` header.
+require_mtls = false
+client_ca = "/etc/shade/pki/botnet-ca.pem"
+# Optional. Defaults to `node.tls.cert` / `node.tls.key`.
+# server_cert = "/etc/shade/pki/admin-server.pem"
+# server_key  = "/etc/shade/pki/admin-server.key"
 
 [metrics]
 listen = "0.0.0.0:9090"

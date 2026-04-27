@@ -103,6 +103,15 @@ pub struct AdminConfig {
     pub require_mtls: bool,
     /// PEM bundle of CAs trusted to issue admin client certificates.
     pub client_ca: PathBuf,
+    /// PEM-encoded server certificate presented to admin clients. Optional;
+    /// when absent the daemon reuses the node's mesh certificate at
+    /// `node.tls.cert`.
+    #[serde(default)]
+    pub server_cert: Option<PathBuf>,
+    /// PEM-encoded server private key. Optional; defaults to `node.tls.key`
+    /// when `server_cert` is also absent.
+    #[serde(default)]
+    pub server_key: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

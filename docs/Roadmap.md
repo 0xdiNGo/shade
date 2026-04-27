@@ -32,8 +32,9 @@ Two Shade nodes, mesh-linked over mTLS, both joined to `#shade-test` on a real I
 * The remaining flood thresholds (we ship 4 of 12 in MVP)
 * The remaining role types (we ship 6 of 13; RESOLV dropped entirely)
 * In-channel `/MSG TOKEN op #foo nick` admin flow (token endpoint scaffolded; PRIVMSG router lands in v0.2)
-* Argon2id-backed `POST /v1/login` issuing short-lived bearer tokens — admin currently trusts the front-of-listener mTLS to assert the operator identity
-* Native mTLS verification on the admin listener (front it with a TLS-terminating proxy or wait for v0.2)
+* Argon2id-backed `POST /v1/login` issuing short-lived bearer tokens for operators without a distributed client cert
+* Mass-op response that acts (auto-deop / lockdown) instead of just logging warn-level alarms
+* CRL/OCSP for admin and node certs — today, lost certs require operator-driven CA rotation
 
 ## Out forever (intentionally)
 
