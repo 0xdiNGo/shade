@@ -196,7 +196,7 @@ Three paths feed the resolved actor on every `/v1` request, in priority order. T
 
 Two ways to mint an [`AuthToken`]:
 
-* **`POST /v1/login`**. Body `{handle, password}`. The server looks up the user, runs Argon2id verify against `password_hash`, and on success mints a fresh 32-byte token. Returns `{token, expires_at}`. The wire form is shown exactly once; the daemon stores only the SHA-256 hash. Default lifetime 1 hour. Rate of expired-row pruning is one DELETE per successful login (no separate sweeper).
+* **`POST /v1/login`**. Body `{handle, password}`. The server looks up the user, runs Argon2id verify against `password_hash`, and on success mints a fresh 32-byte token. Returns `{token, expires_at}`. The wire form is shown exactly once; the daemon stores only the SHA-256 hash. Default lifetime 1 hour. Rate of expired-row pruning is one DELETE per successful login (no separate sweeper). A per-source-IP rate limit (10 attempts per 60 seconds, via `tower_governor`) is applied only to this route to bound Argon2id DoS exposure.
 * **In-channel `TOKEN <handle> <password>` PRIVMSG**. The same Argon2id verify happens, but the password and reply travel over IRC. The daemon replies privately with `token <wire> expires <ts_ms>`. This path **leaks the password to the IRC server admin** (the SASL/IRCD trust boundary holds, but the value is observable on the server). Documented for ergonomics; operators that have a TLS path to `/v1/login` should use it instead.
 
 Tokens are stored in `auth_tokens` with `(hash, handle, expires_at, created_at, origin_node)` and **are not mesh-replicated** — they're local-only credentials, deliberately scoping the blast radius of any single-node compromise to that node's tokens.
