@@ -172,12 +172,13 @@ The daemon's `drive_session` loop runs two policy checks for every peer JOIN:
 
 Mass-action defenses (op floods, mode storms) and the `ROLE_OP` rotation that decides *which* bot actually sets the mode arrive in M5; M3's auto-op fires unconditionally on every node that thinks it should op, which is the right behavior for single-node dev but will be guarded once the mesh is in.
 
-## Cookie verification + mass-op detection
+## Cookie verification + mass-op response
 
 Each Shade node feeds the `MODE` and `NOTICE` events it observes into an `OpObserver` (in `shade-bin/op_observer.rs`):
 
-- A `MODE +o nick` from any source seeds a pending op. If a `NOTICE #c :shade-cookie/<wire>` whose payload's `target_nick` matches arrives within `COOKIE_GRACE_MS` (5 s), the op is logged as **certified by cookie**. Otherwise it ages out and gets logged as **uncertified** — that's the signal for a hijacked-bot scenario.
-- A sliding 10-second per-source window flags any source issuing ≥ 5 ops as a mass-op event. M5 ships warn-level logging only; M6 may add automatic deop / lockdown.
+- A `MODE +o nick` from any source seeds a pending op. If a `NOTICE #c :shade-cookie/<wire>` whose payload's `target_nick` matches arrives within `COOKIE_GRACE_MS` (5 s), the op is logged as **certified by cookie** *and the matching `op_history` entry is removed* — so legitimate role-holder ops never feed the mass-op counter. If the grace window passes with no matching cookie, the op is logged as **uncertified** (the signal for a hijacked-bot scenario).
+- A sliding `MASS_OP_WINDOW_MS` (10 s) per-`(channel, source)` window flags any source issuing ≥ `MASS_OP_THRESHOLD` (5) **uncertified** ops as a mass-op event. The observer returns a typed `MassOpAction::Deop { channel, source, victims }`, which the daemon turns into one `MODE -o` per victim plus a single `mass_op.deop` audit row. After a trip, further events from the same `(channel, source)` are suppressed for `MASS_OP_COOLDOWN_MS` (60 s) — that ceiling prevents op→deop→op→deop flapping if the rogue source keeps ramming ops.
+- The deop response is **gated on `ROLE_OP`** in mesh deployments: only the deterministic role holder for the channel issues the modes. Other peers see the rogue source's ops, observe the role holder's deop in turn, and stay quiet. In single-node mode (no `RoleContext`) the daemon issues the deop directly.
 
 Cookie verification consults `shade_core::cookies::verify`, which checks the HMAC-SHA256 tag (constant-time compare), enforces the `ts_ms` window (`-60s, +5s`), and runs the `request_id` through a `ReplayGuard` ring buffer. A tampered or replayed cookie is rejected with a typed error.
 

@@ -446,13 +446,18 @@ async fn drive_session(
                 let now = shade_core::now_ms();
                 let mut adding = true;
                 let mut arg_idx = 0;
+                let mut actions: Vec<crate::op_observer::MassOpAction> = Vec::new();
                 for c in modes.chars() {
                     match c {
                         '+' => adding = true,
                         '-' => adding = false,
                         'o' if adding => {
                             if let Some(target_nick) = args.get(arg_idx) {
-                                op_observer.record_op(&target, target_nick, &by, now);
+                                if let Some(a) =
+                                    op_observer.record_op(&target, target_nick, &by, now)
+                                {
+                                    actions.push(a);
+                                }
                             }
                             arg_idx += 1;
                         }
@@ -465,6 +470,9 @@ async fn drive_session(
                     }
                 }
                 op_observer.maybe_sweep(now);
+                for action in actions {
+                    apply_mass_op_response(&writer, &store, role_ctx.as_ref(), &action).await;
+                }
             }
             SessionEvent::SaslOutcome { succeeded } => {
                 tracing::info!(succeeded, "irc: sasl outcome");
@@ -616,6 +624,80 @@ async fn apply_join_policy(
             tracing::info!(%channel, %nick, handle = %user_record.handle, "irc: auto-opped (single-node)");
         }
     }
+}
+
+/// Reverse a mass-op event by sending `MODE -o` for every observed
+/// victim and writing one audit row.
+///
+/// **Role gating.** When the mesh is online, only the deterministic
+/// `ROLE_OP` holder for the channel issues the deop — same rule as
+/// `apply_join_policy`. This avoids the entire mesh blasting `-o`
+/// modes simultaneously when one Shade peer trips on a flood.
+///
+/// **Single-node fallback.** Without a `RoleContext` (no mesh, M3-style
+/// demo) the daemon issues the deop directly. There's no role conflict
+/// to worry about.
+///
+/// **Audit.** A single `mass_op.deop` entry is written with the
+/// rogue source + victim list in `details`. We do *not* broadcast a
+/// mesh frame for the action — peers see the `-o` over IRC and can
+/// reach the same conclusion independently.
+async fn apply_mass_op_response(
+    writer: &Writer,
+    store: &Arc<shade_store::Store>,
+    role_ctx: Option<&RoleContext>,
+    action: &crate::op_observer::MassOpAction,
+) {
+    let crate::op_observer::MassOpAction::Deop {
+        channel,
+        source,
+        victims,
+    } = action;
+
+    if let Some(ctx) = role_ctx {
+        let mut peers: Vec<String> = ctx.mesh.peer_node_ids().await;
+        peers.push(ctx.node_id.to_string());
+        let assignment = shade_core::compute_assignment(&peers);
+        let i_hold_op = assignment
+            .get(&shade_core::Role::Op)
+            .is_some_and(|holders| holders.iter().any(|h| h.as_str() == &*ctx.node_id));
+        if !i_hold_op {
+            tracing::info!(
+                %channel, %source,
+                victim_count = victims.len(),
+                "mass-op response observed; not the ROLE_OP holder, deferring"
+            );
+            return;
+        }
+    }
+
+    // Send one MODE per victim. No batching — keep it simple, the
+    // mode_queue already rate-limits outbound writes.
+    for victim in victims {
+        let line = format!("MODE {channel} -o {victim}");
+        if let Err(err) = writer.send(line).await {
+            tracing::warn!(%err, %channel, %victim, "mass-op deop send failed");
+        }
+    }
+
+    let entry = shade_core::AuditEntry::new(
+        shade_core::now_ms(),
+        format!("op-observer@{channel}"),
+        "mass_op.deop",
+        shade_core::AuditSource::System,
+    )
+    .with_target(channel)
+    .with_details(serde_json::json!({
+        "source": source,
+        "victims": victims,
+    }));
+    if let Err(err) = shade_store::audit::insert(store, &entry) {
+        tracing::warn!(%err, "mass-op deop audit insert failed");
+    }
+    tracing::warn!(
+        %channel, %source, victim_count = victims.len(),
+        "mass-op response: deopped all recently-opped victims"
+    );
 }
 
 /// Issue `MODE +o nick` plus a `NOTICE shade-cookie/<wire>` so other
