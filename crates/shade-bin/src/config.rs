@@ -76,6 +76,9 @@ pub struct NetworkConfig {
     /// IRCv3 capabilities to request during cap negotiation.
     #[serde(default)]
     pub caps: Vec<String>,
+    /// Channels to JOIN once registration is complete.
+    #[serde(default)]
+    pub channels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

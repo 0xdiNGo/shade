@@ -1,19 +1,45 @@
-# Local-dev compose for a single Shade node.
+# Local-dev compose.
 #
-# Multi-node mesh + ergo IRC server land in M4. For now this just gets you
-# `docker compose up` with the daemon running, exposing /healthz, /readyz,
-# and /metrics on the host.
+# Two services:
+#   - ergo:  IRCv3 server (https://ergo.chat) listening on 6667 plaintext.
+#   - shade: the daemon, dialing ergo, reaching RPL_WELCOME, joining
+#            #shade-test, and answering `!ping` with `pong`.
+#
+# Multi-node mesh + mTLS land in M4. Until then this is single-node only.
 #
 #   cd deploy
 #   docker compose up --build
+#
+#   # In another terminal:
+#   curl http://127.0.0.1:8443/readyz   # expect irc_connected=true
+#   # any IRC client → 127.0.0.1:6667, /JOIN #shade-test, /MSG #shade-test !ping
 
 services:
+  ergo:
+    image: ghcr.io/ergochat/ergo:stable
+    container_name: shade-ergo
+    ports:
+      - "127.0.0.1:6667:6667"
+    volumes:
+      - ./ergo/ircd.yaml:/ircd/ircd.yaml:ro
+      - ergo-data:/ircd
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-c", "echo > /dev/tcp/127.0.0.1/6667"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
   shade:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
     image: shade:dev
     container_name: shade-dev
+    depends_on:
+      ergo:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8443:8443"  # admin API
       - "127.0.0.1:9090:9090"  # metrics
@@ -24,4 +50,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  ergo-data:
   shade-data:

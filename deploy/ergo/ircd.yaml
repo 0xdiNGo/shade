@@ -1,0 +1,104 @@
+# Minimal ergo config for the M2 demo.
+#
+# Single listener on 6667 plaintext (no TLS) — fine for local docker compose,
+# unsuitable for anything else. Pre-registered #shade-test channel so the bot
+# has somewhere to land.
+
+network:
+  name: ShadeDev
+
+server:
+  name: ergo.local
+  listeners:
+    "0.0.0.0:6667":
+      tls: ""
+      proxy: false
+      min-tls-version: 1.2
+  max-sendq: 96k
+  connection-limits:
+    enabled: true
+    cidr-len-ipv4: 32
+    cidr-len-ipv6: 64
+    connections-per-subnet: 16
+    exempted:
+      - "127.0.0.1/8"
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+  connection-throttling:
+    enabled: false
+  motd: |
+    Welcome to the Shade dev ergo. Local development only.
+  compatibility:
+    force-trailing: true
+    send-unprefixed-sasl: true
+
+accounts:
+  authentication-enabled: true
+  registration:
+    enabled: true
+    enabled-callbacks:
+      - none
+    verify-timeout: "32h"
+    bcrypt-cost: 4
+  login-throttling:
+    enabled: false
+  multiclient:
+    enabled: true
+  default-user-modes: +i
+  nick-reservation:
+    enabled: false
+
+channels:
+  default-modes: +ntC
+  max-channels-per-client: 100
+  registration:
+    enabled: false
+  list-delay: 0s
+  invite-expiration: 24h
+
+oper-classes: {}
+opers: {}
+
+logging:
+  - method: stderr
+    level: info
+    type: "* -userinput -useroutput"
+
+datastore:
+  path: /ircd/ircd.db
+
+limits:
+  nicklen: 32
+  identlen: 20
+  channellen: 64
+  awaylen: 200
+  kicklen: 390
+  topiclen: 390
+  monitor-entries: 100
+  whowas-entries: 100
+  chan-list-modes: 60
+  registration-messages: 1024
+  multiline:
+    max-bytes: 4096
+    max-lines: 100
+
+fakelag:
+  enabled: false
+  window: 1s
+  burst-limit: 5
+  messages-per-window: 2
+  cooldown: 2s
+
+roleplay:
+  enabled: false
+
+extjwt:
+  default:
+    enabled: false
+
+history:
+  enabled: false
+
+debug:
+  recover-from-errors: true

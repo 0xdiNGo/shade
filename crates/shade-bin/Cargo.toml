@@ -30,6 +30,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 shade-api = { path = "../shade-api" }
+shade-ircd = { path = "../shade-ircd" }
 shade-store = { path = "../shade-store" }
 
 [dev-dependencies]
