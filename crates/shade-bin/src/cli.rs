@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 /// Shade IRC bot daemon and operator CLI.
 #[derive(Parser, Debug)]
@@ -53,4 +53,200 @@ pub enum Command {
 
     /// Dump the current SQLite state as JSON.
     DumpState,
+
+    /// Manage users via the admin API.
+    #[command(subcommand)]
+    Users(UsersCommand),
+
+    /// Manage channels via the admin API.
+    #[command(subcommand)]
+    Channels(ChannelsCommand),
+
+    /// Manage per-channel chanset settings.
+    #[command(subcommand)]
+    Chanset(ChansetCommand),
+
+    /// Apply a flag diff to a user's per-channel privileges (Wraith chattr).
+    Chattr {
+        /// User handle.
+        handle: String,
+        /// Channel name (e.g. `#shade-test`).
+        channel: String,
+        /// Flag diff (`+ov-d`).
+        diff: String,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+
+    /// Manage masks (bans / exempts / invites) on a channel.
+    #[command(subcommand)]
+    Mask(MaskCommand),
+
+    /// Show recent audit log entries.
+    Audit {
+        /// Maximum number of entries to return.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Filter to entries whose actor contains this substring.
+        #[arg(long)]
+        actor: Option<String>,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+}
+
+/// Common options for any subcommand that talks to the admin API.
+#[derive(Args, Debug, Clone)]
+pub struct ClientArgs {
+    /// Admin API base URL (e.g. `http://127.0.0.1:8443`). Defaults to the
+    /// admin listener from the config file when absent.
+    #[arg(long, env = "SHADECTL_BASE")]
+    pub base: Option<String>,
+
+    /// Actor identifier sent in the `X-Actor` header for audit purposes.
+    /// Defaults to `cli:$USER` if neither flag nor env is set.
+    #[arg(long, env = "SHADECTL_ACTOR")]
+    pub actor: Option<String>,
+
+    /// Pretty-print JSON output (multi-line, indented).
+    #[arg(long)]
+    pub pretty: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum UsersCommand {
+    /// List all users.
+    List {
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+    /// Show one user.
+    Show {
+        handle: String,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+    /// Create or update a user. Idempotent on handle.
+    Upsert {
+        handle: String,
+        /// Absolute global flag set (e.g. `+a`).
+        #[arg(long)]
+        flags: Option<String>,
+        /// Mark as a bot account.
+        #[arg(long)]
+        bot: bool,
+        /// Free-form comment.
+        #[arg(long)]
+        comment: Option<String>,
+        /// Hostmasks for passive identification (repeatable).
+        #[arg(long = "host", value_name = "MASK")]
+        hosts: Vec<String>,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+    /// Delete a user.
+    Delete {
+        handle: String,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+    /// Apply a flag diff to the user's *global* flag set (`+a-x`).
+    Chattr {
+        handle: String,
+        diff: String,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ChannelsCommand {
+    List {
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+    Show {
+        name: String,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+    Upsert {
+        name: String,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+    Delete {
+        name: String,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ChansetCommand {
+    Get {
+        name: String,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+    /// Update one or more chanset fields.
+    Put {
+        name: String,
+        #[arg(long)]
+        flags: Option<String>,
+        #[arg(long = "mode-pls")]
+        mode_pls: Option<String>,
+        #[arg(long = "mode-mns")]
+        mode_mns: Option<String>,
+        /// Channel limit to enforce. Use `--no-limit` to clear.
+        #[arg(long)]
+        limit: Option<i32>,
+        #[arg(long, conflicts_with = "limit")]
+        no_limit: bool,
+        #[arg(long)]
+        key: Option<String>,
+        #[arg(long, conflicts_with = "key")]
+        no_key: bool,
+        #[arg(long)]
+        topic: Option<String>,
+        #[arg(long, conflicts_with = "topic")]
+        no_topic: bool,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MaskCommand {
+    /// List masks on a channel.
+    List {
+        channel: String,
+        /// Mask kind: `ban`, `exempt`, `invite`.
+        #[arg(long, default_value = "ban")]
+        kind: String,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+    /// Add a mask.
+    Add {
+        channel: String,
+        mask: String,
+        #[arg(long, default_value = "ban")]
+        kind: String,
+        #[arg(long)]
+        reason: Option<String>,
+        /// Expiry in Unix milliseconds.
+        #[arg(long)]
+        expires_at: Option<i64>,
+        #[arg(long)]
+        sticky: bool,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
+    /// Remove a mask by ULID.
+    Remove {
+        id: String,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
 }

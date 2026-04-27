@@ -6,6 +6,7 @@ mod cli;
 mod commands;
 mod config;
 mod daemon;
+mod shadectl;
 mod telemetry;
 
 fn main() -> ExitCode {

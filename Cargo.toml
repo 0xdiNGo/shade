@@ -59,6 +59,9 @@ thiserror = "2"
 # Encoding
 base64 = "0.22"
 
+# HTTP client for shadectl
+ureq = { version = "2.10", features = ["json"], default-features = false }
+
 # Utilities
 ulid = { version = "1", features = ["serde"] }
 jiff = { version = "0.1", features = ["serde"] }
