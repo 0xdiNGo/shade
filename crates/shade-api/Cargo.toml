@@ -17,12 +17,18 @@ axum.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+ulid.workspace = true
+
+shade-core = { path = "../shade-core" }
+shade-store = { path = "../shade-store" }
 
 [dev-dependencies]
 http.workspace = true
 http-body-util.workspace = true
-serde_json.workspace = true
+tower = { workspace = true, features = ["util"] }

@@ -25,16 +25,32 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Letter-encoded flag bitmap.
 ///
-/// Internal representation is `u64` so the type is `Copy` and serializes
-/// trivially (e.g. as `INTEGER` in SQLite).
-#[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+/// Internal representation is `u64` so the type is `Copy`. The serde
+/// representation is the human-readable Wraith-style diff string
+/// (e.g. `"+ovx"` or `""` for the empty set), making API payloads
+/// readable and CLI inputs natural. Storage code converts via
+/// [`FlagSet::bits`] / [`FlagSet::from_bits`] when writing to SQLite's
+/// `INTEGER` column, so the on-disk format stays compact.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FlagSet {
     bits: u64,
+}
+
+impl Serialize for FlagSet {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for FlagSet {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 impl FlagSet {

@@ -5,9 +5,11 @@
 //! it does, `peers_up` stays false and `/readyz` reports 503 until M4 lands.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use shade_api::admin::{AdminState, ReadinessProbes};
+use shade_api::v1::ApiState;
 use shade_ircd::{
     BackoffConfig, ConnectionConfig, ReadyHandle, SaslMechanism, Session, SessionConfig,
     SessionEvent, TlsMode, WriteRateConfig, Writer,
@@ -43,6 +45,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         migrations_applied = report.applied,
         "store opened"
     );
+    let store = Arc::new(store);
 
     let readiness = ReadinessProbes::new();
     readiness.set_store_open(true);
@@ -55,7 +58,11 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     let admin_router = shade_api::admin::router(AdminState {
         readiness: readiness.clone(),
-    });
+    })
+    .merge(shade_api::v1::router(ApiState {
+        store: store.clone(),
+        node_id: Arc::from(cfg.node.id.as_str()),
+    }));
     let metrics_router = shade_api::metrics::router(metrics_handle);
 
     let admin = tokio::spawn(serve("admin", cfg.admin.listen, admin_router));
