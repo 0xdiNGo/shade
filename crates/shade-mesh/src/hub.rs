@@ -114,6 +114,13 @@ impl MeshHub {
         self.inner.peers_up.clone()
     }
 
+    /// Snapshot of currently-connected peer `node_id`s. Used by the
+    /// daemon to compute role distribution per channel — the eligible
+    /// peer set is `[self.node_id] + this.peer_node_ids()`.
+    pub async fn peer_node_ids(&self) -> Vec<String> {
+        self.inner.peers.lock().await.keys().cloned().collect()
+    }
+
     /// Broadcast an `Upsert` to every connected peer. Drops the frame
     /// silently if the peer's outbound queue is full — slow peers get
     /// disconnected and re-snapshot on reconnect (per CLAUDE.md sync
