@@ -39,6 +39,7 @@ const NODE_KEY_FILE: &str = "node.key";
 
 const CA_VALIDITY_DAYS: u64 = 365 * 5;
 const NODE_VALIDITY_DAYS: u64 = 365 * 2;
+const ADMIN_VALIDITY_DAYS: u64 = 365;
 
 /// Generate a self-signed root CA and write it to `out_dir`.
 ///
@@ -177,6 +178,82 @@ pub fn issue_cert(node_id: &str, ca_dir: &Path, out_dir: &Path) -> Result<()> {
         "wrote {} and {} (CN={node_id}) to {}",
         NODE_CERT_FILE,
         NODE_KEY_FILE,
+        out_dir.display()
+    );
+    Ok(())
+}
+
+/// Issue an **admin client** certificate signed by the CA at `ca_dir`.
+///
+/// Subject CN = `handle`; **no SAN**. EKU = clientAuth only — these
+/// certs are presented by operators (or `shadectl`) to authenticate to
+/// the admin listener and must never be honored as a server identity.
+///
+/// The handle becomes the audit `actor` for every request from this
+/// cert holder. It must match an existing `User.handle` (case-
+/// insensitive); operators bootstrap the user record via `shadectl users
+/// upsert` before issuing the cert.
+///
+/// Files written to `out_dir`:
+/// * `<handle>.pem` — PEM-encoded client cert (chmod 0644)
+/// * `<handle>.key` — PEM-encoded private key (chmod 0600)
+pub fn issue_admin_cert(handle: &str, ca_dir: &Path, out_dir: &Path) -> Result<()> {
+    let trimmed = handle.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("--handle must not be empty"));
+    }
+    if trimmed.contains('/') || trimmed.contains('\0') {
+        return Err(anyhow!(
+            "--handle `{trimmed}` contains characters not allowed in a filename"
+        ));
+    }
+    fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+
+    let ca_pem = fs::read_to_string(ca_dir.join(CA_CERT_FILE))
+        .with_context(|| format!("reading {}", ca_dir.join(CA_CERT_FILE).display()))?;
+    let ca_key_pem = fs::read_to_string(ca_dir.join(CA_KEY_FILE))
+        .with_context(|| format!("reading {}", ca_dir.join(CA_KEY_FILE).display()))?;
+
+    let ca_kp = KeyPair::from_pem(&ca_key_pem).context("parsing CA private key")?;
+    let ca_params = CertificateParams::from_ca_cert_pem(&ca_pem)
+        .context("parsing CA certificate (enable rcgen 'x509-parser' feature)")?;
+    let ca_cert = ca_params
+        .self_signed(&ca_kp)
+        .context("re-binding CA cert to its key pair")?;
+
+    let kp =
+        KeyPair::generate_for(&rcgen::PKCS_ED25519).context("generating admin Ed25519 key pair")?;
+    let mut params =
+        CertificateParams::new(Vec::<String>::new()).context("init admin client cert params")?;
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, trimmed);
+    dn.push(DnType::OrganizationName, "Shade Admin");
+    params.distinguished_name = dn;
+    // Deliberately no SAN — admin certs are not server identities.
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+    params.use_authority_key_identifier_extension = true;
+    params.key_identifier_method = KeyIdMethod::Sha256;
+    let now = std::time::SystemTime::now();
+    params.not_before = (now - std::time::Duration::from_secs(60)).into();
+    params.not_after = (now + std::time::Duration::from_secs(ADMIN_VALIDITY_DAYS * 86_400)).into();
+
+    let signed = params
+        .signed_by(&kp, &ca_cert, &ca_kp)
+        .context("signing admin client cert with CA")?;
+
+    let cert_path = out_dir.join(format!("{trimmed}.pem"));
+    let key_path = out_dir.join(format!("{trimmed}.key"));
+    write_secure(&cert_path, signed.pem().as_bytes(), 0o644)?;
+    write_secure(&key_path, kp.serialize_pem().as_bytes(), 0o600)?;
+
+    println!(
+        "wrote {} and {} (CN={trimmed}, EKU=clientAuth, no SAN) to {}",
+        cert_path.file_name().unwrap_or_default().to_string_lossy(),
+        key_path.file_name().unwrap_or_default().to_string_lossy(),
         out_dir.display()
     );
     Ok(())

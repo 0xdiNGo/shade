@@ -32,14 +32,18 @@ curl http://127.0.0.1:9090/metrics          # Prometheus text
 
 Mounted on the same admin listener. Documented in [Architecture § Admin API](Architecture.md#admin-api).
 
-```sh
-curl -sH 'X-Actor: @ops' http://127.0.0.1:8443/v1/users
-curl -sH 'X-Actor: @ops' -X POST http://127.0.0.1:8443/v1/users \
-  -H 'content-type: application/json' \
-  -d '{"handle":"alice","global_flags":"+a","hosts":["alice!*@trusted.example"]}'
-```
+With `admin.require_mtls = true` (the default) the listener verifies a client cert chain rooted at `admin.client_ca` and derives the audit actor from the cert Subject CN. The dev path (`require_mtls = false`) reads `X-Actor` from the request headers — only used in tests.
 
-Production deployments **must** front the admin listener with mTLS. Today the API doesn't enforce auth itself — that's an M4 concern.
+```sh
+# Production: mTLS to the daemon, audit actor = cert CN.
+curl --cert /etc/shade/admin/alice.pem \
+     --key  /etc/shade/admin/alice.key \
+     --cacert /etc/shade/pki/botnet-ca.pem \
+     https://shade-iad-01.internal:8443/v1/users
+
+# Dev (require_mtls = false): plain HTTP, X-Actor header for audit.
+curl -sH 'X-Actor: @ops' http://127.0.0.1:8443/v1/users
+```
 
 ### `shadectl` operator CLI
 
@@ -69,7 +73,15 @@ shade audit --limit 50
 shade audit --actor alice                 # substring filter
 ```
 
-`--base` overrides the API base URL (default reads `admin.listen` from the config file). `--actor` overrides the `X-Actor` header (default `cli:$USER`). `--pretty` indents JSON.
+`--base` overrides the API base URL (default reads `admin.listen` from the config file; scheme defaults to `https` when `--cert` is set, `http` otherwise). `--cert`, `--key`, and `--ca-bundle` (or `SHADECTL_CERT`, `SHADECTL_KEY`, `SHADECTL_CA_BUNDLE`) supply the admin client cert that the daemon's mTLS listener requires; the cert Subject CN becomes the audit actor and `--actor` is ignored. `--actor` is honored only against a `require_mtls = false` daemon. `--pretty` indents JSON.
+
+```sh
+# Talk to a production daemon over mTLS.
+shade users list \
+  --cert      /etc/shade/admin/alice.pem \
+  --key       /etc/shade/admin/alice.key \
+  --ca-bundle /etc/shade/pki/botnet-ca.pem
+```
 
 ### M3 demo path (auto-op + auto-kick)
 
@@ -150,6 +162,29 @@ ssh target systemctl restart shade
 ```
 
 CA rotation is a heavier procedure: re-bootstrap the CA on a new node, reissue every node cert, copy the new CA bundle to every node, restart in a rolling fashion.
+
+#### Issuing an admin client cert
+
+Operators authenticate to the admin listener with an mTLS client cert. The cert's Subject CN must match a `User.handle` already in the store — the handle propagates into every audit row written by that operator. Workflow:
+
+```sh
+# 1. Create the operator's user record. Hostmasks are optional; flags
+#    can be tuned later via `shadectl users chattr`.
+shade users upsert alice --flags +a --comment "ops on-call"
+
+# 2. Sign a client cert keyed to that handle. CN=alice, EKU=clientAuth,
+#    no SAN. 1-year validity by default.
+shade issue-admin-cert --handle alice \
+                       --ca-dir /etc/shade/pki \
+                       --out-dir /etc/shade/admin
+
+# 3. Distribute alice.pem + alice.key to the operator's workstation
+#    over a confidential channel (Vault, age-encrypted file, USB, etc.).
+#    Set SHADECTL_CERT / SHADECTL_KEY in their shell to use them by
+#    default with shadectl.
+```
+
+Revocation today is by user removal: `shadectl users delete alice` strips the row and any per-channel flags. The cert itself is still cryptographically valid until expiry; until CRL/OCSP lands (v0.2), a compromised operator cert means the CA must be rotated to invalidate it.
 
 #### Mesh PSK rotation
 

@@ -2,13 +2,22 @@
 //!
 //! Synchronous (`ureq`) — every subcommand is a short-lived HTTP request.
 //! No tokio runtime, no connection pool. The `ClientArgs` flags
-//! (`--base`, `--actor`, `--pretty`) are shared across every subcommand
-//! via `#[command(flatten)]` in `cli.rs`.
+//! (`--base`, `--actor`, `--cert`, `--key`, `--ca-bundle`, `--pretty`)
+//! are shared across every subcommand via `#[command(flatten)]` in
+//! `cli.rs`.
+//!
+//! When `--cert` is set, ureq's rustls config presents the cert to the
+//! daemon's mTLS admin listener, the daemon derives the audit actor
+//! from the verified cert CN, and the URL scheme defaults to `https`.
 
 use std::fmt::Write;
+use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::{ClientConfig, RootCertStore};
 use serde_json::json;
 
 use crate::cli::{ChannelsCommand, ChansetCommand, ClientArgs, MaskCommand, UsersCommand};
@@ -20,36 +29,41 @@ struct ApiClient {
     base: String,
     actor: String,
     pretty: bool,
+    agent: ureq::Agent,
 }
 
 impl ApiClient {
     fn from_args(config_path: &Path, args: &ClientArgs) -> Result<Self> {
+        let cfg = Config::load(config_path)
+            .with_context(|| format!("loading {}", config_path.display()))?;
+        let tls_enabled = args.cert.is_some();
         let base = if let Some(b) = &args.base {
             b.clone()
         } else {
-            let cfg = Config::load(config_path)
-                .with_context(|| format!("loading {}", config_path.display()))?;
             let listen = cfg.admin.listen;
             let host = match listen.ip() {
                 std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
                 other => other.to_string(),
             };
-            format!("http://{host}:{}", listen.port())
+            let scheme = if tls_enabled { "https" } else { "http" };
+            format!("{scheme}://{host}:{}", listen.port())
         };
         let actor = args
             .actor
             .clone()
             .unwrap_or_else(|| format!("cli:{}", whoami_or_unknown()));
+        let agent = build_agent(args, &cfg)?;
         Ok(Self {
             base,
             actor,
             pretty: args.pretty,
+            agent,
         })
     }
 
     fn request(&self, method: &str, path: &str) -> ureq::Request {
         let url = format!("{}{path}", self.base);
-        ureq::request(method, &url).set("X-Actor", &self.actor)
+        self.agent.request(method, &url).set("X-Actor", &self.actor)
     }
 
     fn run_json(&self, req: ureq::Request, body: Option<&serde_json::Value>) -> Result<()> {
@@ -92,6 +106,84 @@ fn whoami_or_unknown() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "unknown".into())
+}
+
+/// Build the ureq Agent. When `--cert` is supplied, configures rustls
+/// with the operator's client certificate + private key and the
+/// CA bundle that signs the daemon's admin server cert; otherwise
+/// returns a plain Agent that can only speak HTTP.
+fn build_agent(args: &ClientArgs, cfg: &Config) -> Result<ureq::Agent> {
+    let Some(cert_path) = &args.cert else {
+        if args.key.is_some() {
+            return Err(anyhow!("--key requires --cert"));
+        }
+        return Ok(ureq::AgentBuilder::new().build());
+    };
+    let key_path = args
+        .key
+        .as_ref()
+        .ok_or_else(|| anyhow!("--cert requires --key"))?;
+    let ca_path = args
+        .ca_bundle
+        .as_deref()
+        .unwrap_or(cfg.node.tls.ca_bundle.as_path());
+
+    let ca_certs = read_pem_certs(ca_path)?;
+    let cert_chain = read_pem_certs(cert_path)?;
+    let key = read_pem_key(key_path)?;
+
+    let mut roots = RootCertStore::empty();
+    for cert in ca_certs {
+        roots
+            .add(cert)
+            .map_err(|e| anyhow!("adding CA to root store: {e}"))?;
+    }
+    let tls = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(cert_chain, key)
+        .map_err(|e| anyhow!("building rustls client config: {e}"))?;
+
+    Ok(ureq::AgentBuilder::new().tls_config(Arc::new(tls)).build())
+}
+
+fn read_pem_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+    let pem =
+        fs::read_to_string(path).with_context(|| format!("reading PEM at {}", path.display()))?;
+    let mut out = Vec::new();
+    for block in pem::parse_many(pem.as_bytes())
+        .with_context(|| format!("parsing PEM at {}", path.display()))?
+    {
+        if block.tag().eq_ignore_ascii_case("CERTIFICATE") {
+            out.push(CertificateDer::from(block.contents().to_vec()));
+        }
+    }
+    if out.is_empty() {
+        return Err(anyhow!(
+            "no CERTIFICATE blocks in PEM at {}",
+            path.display()
+        ));
+    }
+    Ok(out)
+}
+
+fn read_pem_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
+    let pem = fs::read_to_string(path)
+        .with_context(|| format!("reading key PEM at {}", path.display()))?;
+    for block in pem::parse_many(pem.as_bytes())
+        .with_context(|| format!("parsing key PEM at {}", path.display()))?
+    {
+        let tag = block.tag();
+        if tag.eq_ignore_ascii_case("PRIVATE KEY") || tag.eq_ignore_ascii_case("PKCS8 PRIVATE KEY")
+        {
+            return Ok(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                block.contents().to_vec(),
+            )));
+        }
+    }
+    Err(anyhow!(
+        "no PKCS#8 PRIVATE KEY block in PEM at {}",
+        path.display()
+    ))
 }
 
 fn percent_encode(s: &str) -> String {

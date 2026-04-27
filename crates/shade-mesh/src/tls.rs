@@ -97,6 +97,40 @@ pub fn cert_node_id(cert: &CertificateDer<'_>) -> Option<String> {
     cn
 }
 
+/// Extract the Subject CN from a peer cert.
+///
+/// Used by the admin listener to map an mTLS client cert to a User
+/// handle. Unlike [`cert_node_id`] this ignores SAN entries entirely:
+/// admin certs issued by `shade issue-admin-cert` have no SAN, and an
+/// operator handle is by definition not a DNS name.
+#[must_use]
+pub fn cert_subject_cn(cert: &CertificateDer<'_>) -> Option<String> {
+    let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_ref()).ok()?;
+    let cn = parsed
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .map(str::to_owned);
+    cn
+}
+
+/// Build a rustls `ServerConfig` for the admin listener.
+///
+/// Identical to [`server_config`] aside from the doc that this listener
+/// faces operators rather than peer Shade nodes — same trust pattern
+/// (client cert chained to `ca_bundle` is required), same handshake
+/// requirements. Kept as a separate entry point so the admin listener's
+/// trust root can diverge from the mesh trust root in the future
+/// without touching the call site.
+pub fn admin_server_config(
+    ca_bundle: Vec<CertificateDer<'static>>,
+    cert_chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<ServerConfig, TlsConfigError> {
+    server_config(ca_bundle, cert_chain, key)
+}
+
 #[cfg(test)]
 pub(crate) mod test_pki {
     //! Reusable rcgen scaffolding for tests in this crate.
@@ -105,11 +139,22 @@ pub(crate) mod test_pki {
     //! parameters the production `shade init-ca` / `shade issue-cert`
     //! use, just without writing PEM to disk.
 
+    use std::sync::Once;
+
     use rcgen::{
         BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
         KeyUsagePurpose, SanType,
     };
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+    /// Install the rustls `ring` crypto provider before any test uses
+    /// rustls. The provider is process-global; we install once.
+    pub fn install_crypto_provider() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
 
     #[allow(clippy::struct_field_names)]
     pub struct TestPki {
@@ -120,6 +165,7 @@ pub(crate) mod test_pki {
 
     impl TestPki {
         pub fn new() -> Self {
+            install_crypto_provider();
             let kp = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
             let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
             let mut dn = DistinguishedName::new();

@@ -100,7 +100,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     }));
     let metrics_router = shade_api::metrics::router(metrics_handle);
 
-    let admin = tokio::spawn(serve("admin", cfg.admin.listen, admin_router));
+    let admin = spawn_admin_listener(&cfg, admin_router)?;
     let metrics = tokio::spawn(serve("metrics", cfg.metrics.listen, metrics_router));
 
     wait_for_shutdown().await?;
@@ -249,6 +249,56 @@ async fn serve(name: &'static str, addr: SocketAddr, router: axum::Router) -> Re
         .await
         .with_context(|| format!("{name} server"))?;
     Ok(())
+}
+
+/// Decide between the mTLS admin listener and the plain-TCP fallback.
+///
+/// If `admin.require_mtls` is true and the operator-CA bundle + server
+/// cert/key are on disk, bring up the rustls accept loop. Otherwise log
+/// loudly and fall back to plain TCP — fine for tests but a configuration
+/// error in production.
+fn spawn_admin_listener(
+    cfg: &Config,
+    router: axum::Router,
+) -> Result<tokio::task::JoinHandle<Result<()>>> {
+    let admin = &cfg.admin;
+    let server_cert_path = admin
+        .server_cert
+        .as_deref()
+        .unwrap_or(cfg.node.tls.cert.as_path());
+    let server_key_path = admin
+        .server_key
+        .as_deref()
+        .unwrap_or(cfg.node.tls.key.as_path());
+
+    if !admin.require_mtls {
+        tracing::warn!(
+            addr = %admin.listen,
+            "admin: require_mtls=false — serving plain HTTP (development only)"
+        );
+        return Ok(tokio::spawn(serve("admin", admin.listen, router)));
+    }
+
+    if !crate::admin_tls::admin_tls_present(admin, server_cert_path) {
+        tracing::warn!(
+            client_ca = %admin.client_ca.display(),
+            cert = %server_cert_path.display(),
+            key = %server_key_path.display(),
+            "admin: require_mtls=true but PKI material missing — falling back to plain HTTP. \
+             run `shade init-ca` + `shade issue-cert` + `shade issue-admin-cert` to bring mTLS online."
+        );
+        return Ok(tokio::spawn(serve("admin", admin.listen, router)));
+    }
+
+    let client_ca = read_pem_certs(&admin.client_ca)?;
+    let cert_chain = read_pem_certs(server_cert_path)?;
+    let key = read_pem_key(server_key_path)?;
+    let server_config = crate::admin_tls::build_server_config(client_ca, cert_chain, key)?;
+
+    let listen = admin.listen;
+    Ok(tokio::spawn(async move {
+        crate::admin_tls::serve_admin_tls(listen, server_config, router).await
+    }))
 }
 
 async fn wait_for_shutdown() -> Result<()> {

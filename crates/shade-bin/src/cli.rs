@@ -45,6 +45,24 @@ pub enum Command {
         out_dir: PathBuf,
     },
 
+    /// Issue an admin client certificate signed by the botnet CA.
+    ///
+    /// Used to authenticate operators and `shadectl` to the admin
+    /// listener. Subject CN equals the user handle, with EKU=clientAuth
+    /// (and no SAN — these certs must never serve as a server identity).
+    IssueAdminCert {
+        /// User handle. Becomes the cert Subject CN and the audit
+        /// `actor` for every request issued with this cert.
+        #[arg(long)]
+        handle: String,
+        /// Directory containing the botnet CA created by `init-ca`.
+        #[arg(long)]
+        ca_dir: PathBuf,
+        /// Directory to write the issued cert and key.
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
+
     /// Run pending database migrations against the configured data directory.
     Migrate,
 
@@ -98,15 +116,34 @@ pub enum Command {
 /// Common options for any subcommand that talks to the admin API.
 #[derive(Args, Debug, Clone)]
 pub struct ClientArgs {
-    /// Admin API base URL (e.g. `http://127.0.0.1:8443`). Defaults to the
-    /// admin listener from the config file when absent.
+    /// Admin API base URL (e.g. `https://127.0.0.1:8443`). Defaults to
+    /// the admin listener from the config file. Scheme defaults to
+    /// `https` when `--cert` is supplied, `http` otherwise.
     #[arg(long, env = "SHADECTL_BASE")]
     pub base: Option<String>,
 
     /// Actor identifier sent in the `X-Actor` header for audit purposes.
-    /// Defaults to `cli:$USER` if neither flag nor env is set.
+    /// Ignored when the daemon is running with mTLS enforced — the
+    /// audit actor is taken from the verified client cert subject CN.
+    /// Defaults to `cli:$USER` when neither flag nor env is set.
     #[arg(long, env = "SHADECTL_ACTOR")]
     pub actor: Option<String>,
+
+    /// PEM-encoded admin client certificate (issued by
+    /// `shade issue-admin-cert`). Required to talk to a daemon with
+    /// `admin.require_mtls = true`.
+    #[arg(long, env = "SHADECTL_CERT")]
+    pub cert: Option<PathBuf>,
+
+    /// PEM-encoded private key matching `--cert`.
+    #[arg(long, env = "SHADECTL_KEY")]
+    pub key: Option<PathBuf>,
+
+    /// PEM bundle of CAs trusted for the admin listener's server cert.
+    /// Defaults to the botnet CA at `node.tls.ca_bundle` from the config
+    /// file (the same root that signs admin client certs).
+    #[arg(long, env = "SHADECTL_CA_BUNDLE")]
+    pub ca_bundle: Option<PathBuf>,
 
     /// Pretty-print JSON output (multi-line, indented).
     #[arg(long)]

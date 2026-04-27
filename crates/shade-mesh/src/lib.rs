@@ -34,4 +34,7 @@ pub use handshake::{run_handshake, HandshakeError};
 pub use hub::{HubError, MeshHub, MeshHubConfig, MeshPeer};
 pub use peer::{accept_peer, dial_peer, PeerError, PeerStream};
 pub use peer_loop::{run_peer, PeerLoopError};
-pub use tls::{cert_node_id, client_config, server_config, TlsConfigError};
+pub use tls::{
+    admin_server_config, cert_node_id, cert_subject_cn, client_config, server_config,
+    TlsConfigError,
+};

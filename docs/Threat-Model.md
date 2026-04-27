@@ -23,7 +23,7 @@ The IRC server is **not trusted for op authority**. It is trusted to deliver mes
 | Compromised peer cert | Connect to the mesh, exchange `PeerHello`, push upserts. | Cert SAN is bound to `node_id`; `PeerHello.node_id` must match. CA pinning prevents an unrelated CA's certs from authenticating. Stolen-cert revocation is a CRL-list TODO (v0.2). |
 | Compromised mesh PSK | Mint valid cookies for any channel. | Full rebuild required — operator runbook covers PSK rotation. |
 | Network partition | Both halves think they hold `ROLE_OP`; double-ops happen. | Cookie verification keeps both ops legitimate (only the mesh sees who issued each). On heal, snapshot reconciliation makes the eligible-peer set whole again before the next rebalance tick. |
-| Hijacked admin client cert | Hit `/v1`, write arbitrary state. | **Not yet enforced** — admin listener mTLS is a v0.2 item. Today the deployment must front the listener with a TLS-terminating proxy that handles client-cert verification, or a network-segmented private subnet. |
+| Hijacked admin client cert | Hit `/v1`, write arbitrary state. | Native mTLS verification on the admin listener: `WebPkiClientVerifier` rooted at `admin.client_ca`, cert Subject CN bound to `User.handle`, every request audited under that handle. Lost certs still require operator-driven CA rotation until CRL/OCSP lands (v0.2). |
 
 ## What we don't defend against
 
@@ -50,8 +50,8 @@ The IRC server is **not trusted for op authority**. It is trusted to deliver mes
 
 | Item | Why it's open | Tracked in |
 |---|---|---|
-| Admin listener mTLS verification | API trusts X-Actor; proxy-fronting required for production. | Roadmap § Out of MVP scope |
-| Argon2id-backed `POST /v1/login` | Token issuance for non-cert operators. | Roadmap § Out of MVP scope |
+| Argon2id-backed `POST /v1/login` | Token issuance for operators without cert distribution. | Roadmap § Out of MVP scope |
 | In-channel `/MSG TOKEN` flow | Operator UX promised in [Architecture § Authentication](Architecture.md#authentication). | Roadmap § Out of MVP scope |
-| Cert revocation list / OCSP | Today, lost certs require CA rotation. | v0.2 |
+| Mass-op response that acts | Today the alarm only logs `warn`; auto-deop / lockdown is open work. | Roadmap § Out of MVP scope |
+| Cert revocation list / OCSP | Lost admin or node certs still require CA rotation. | v0.2 |
 | Formal external review | We've reviewed our own code; that is not the same thing. | When the project graduates beyond pre-alpha. |

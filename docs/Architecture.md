@@ -147,9 +147,21 @@ Why this is materially better than Wraith's MD5+counter scheme is in [Improvemen
 
 `PATCH` and `PUT` flag endpoints accept either an absolute set (`flags` / `global_flags`) or a Wraith-style `flags_diff` (`+ox-d`) applied to the existing row.
 
-Every mutation writes one `AuditEntry` (`AuditSource::Api`) before returning. Audit writes are best-effort: a failure to insert is logged but does not roll back the mutation. The actor for the audit row is taken from the `X-Actor` request header, defaulting to the node ID. Production deployments must front the listener with mTLS — the API does not authenticate by itself.
+Every mutation writes one `AuditEntry` (`AuditSource::Api`) before returning. Audit writes are best-effort: a failure to insert is logged but does not roll back the mutation.
 
-`shadectl` is the operator CLI (`shade users …`, `shade channels …`, `shade chattr …`, `shade mask …`, `shade audit`). Synchronous `ureq`; one HTTP call per subcommand. Output is the API's raw JSON (or `--pretty` indented).
+### Authentication (mTLS)
+
+`admin.require_mtls = true` (the default) binds the admin listener to a rustls `WebPkiClientVerifier` rooted at `admin.client_ca`. The TLS accept loop in `shade-bin::admin_tls`:
+
+1. Completes the handshake; clients without a cert or with a chain that doesn't validate are dropped before any HTTP bytes flow.
+2. Extracts the verified peer cert's Subject CN (`shade_mesh::cert_subject_cn`) — that string is the operator's `User.handle`.
+3. Wraps the admin router in an `Extension(VerifiedActor(handle))` layer for that connection. Every request is then tagged with the cryptographically authenticated actor.
+
+Routes pull the resolved identity through `shade_api::auth::ActorClaim`, which prefers `VerifiedActor` over the `X-Actor` header, falling back to the node ID for audit when neither is set. The `X-Actor` path remains only for the dev-only `require_mtls = false` mode used in tests and the M3-style demo.
+
+Operator certs are issued with `shade issue-admin-cert --handle <user-handle>`: Subject CN = handle, no SAN, EKU = clientAuth only. The handle must already exist as a Shade `User` (via `shadectl users upsert`) so per-channel flags can attach to it.
+
+`shadectl` is the operator CLI (`shade users …`, `shade channels …`, `shade chattr …`, `shade mask …`, `shade audit`). Synchronous `ureq` with a rustls `tls_config` when `--cert/--key/--ca-bundle` (or `SHADECTL_CERT/SHADECTL_KEY/SHADECTL_CA_BUNDLE`) are supplied; one HTTP call per subcommand. Output is the API's raw JSON (or `--pretty` indented).
 
 ### On-JOIN policy
 
