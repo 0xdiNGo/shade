@@ -24,12 +24,12 @@ Cargo workspace at [github.com/0xdiNGo/shade](https://github.com/0xdiNGo/shade):
 | Crate | Purpose |
 |---|---|
 | `shade-proto` | Mesh wire types, version negotiation. I/O-free; consumable by external tools. |
-| `shade-core` | Pure domain types: `User`, `Channel`, `Ban`, `Role`, `FlagSet`, audit. |
-| `shade-ircd` | IRC client: parser, IRCv3 caps, SASL, mode queue, channel state. |
+| `shade-core` | Pure domain types: `User`, `Channel`, `ChannelSettings`, `ChannelUserFlags`, `Mask`, `Role`, `FlagSet`, `AuditEntry`. |
+| `shade-ircd` | IRC client: parser, IRCv3 caps, SASL, mode queue, channel state, async session loop. |
 | `shade-mesh` | mTLS listener and dialer; peer state; snapshot + delta gossip. |
-| `shade-api` | axum HTTP+JSON admin API; `/healthz`, `/readyz`, `/metrics`; CRUD endpoints (M3). |
-| `shade-store` | SQLite (bundled libsqlite3) connection pool; refinery migrations. |
-| `shade-bin` | Binary entrypoint; CLI subcommands: `run`, `migrate`, `init-ca`, `issue-cert`, `check-config`, `dump-state`. |
+| `shade-api` | axum HTTP+JSON admin API; `/healthz`, `/readyz`, `/metrics`; `/v1` CRUD for users / channels / masks / audit. |
+| `shade-store` | SQLite (bundled libsqlite3) connection pool; refinery migrations; CRUD accessors returning shade-core types. |
+| `shade-bin` | Binary entrypoint. Daemon subcommands (`run`, `migrate`, `init-ca`, `issue-cert`, `check-config`, `dump-state`) and the operator CLI (`users`, `channels`, `chanset`, `chattr`, `mask`, `audit`). |
 
 Why we under-split: bdlib's micromodularity in Wraith is a cautionary tale. Each crate above earns its boundary; we do not have a `shade-flags` crate or a `shade-config` crate.
 
@@ -145,7 +145,7 @@ Mass-action defenses (op floods, mode storms) and the `ROLE_OP` rotation that de
 
 ## Authentication
 
-Two paths:
+Two paths in the eventual design:
 
 | Surface | Mechanism |
 |---|---|
@@ -153,6 +153,8 @@ Two paths:
 | In-channel admin (`/MSG shade TOKEN <hex> op #foo nick`) | Short-lived bearer token (≤ 15 min) minted via API: `POST /v1/users/{handle}/irc-tokens`. Hashed-stored, single-use. |
 
 Hostmask passive identification stays for last-seen tracking but **never grants permissions**. Wraith's AUTHSTART/AUTH MD5 challenge, telnet/DCC password auth, and SECPASS are dropped.
+
+> **As of M3:** mTLS enforcement on the admin listener is not yet wired — the API trusts the `X-Actor` request header for audit attribution and accepts any caller. Production deployments must front the admin listener with mTLS today (the listener address default `0.0.0.0:8443` deliberately invites this); native mTLS verification with subject-CN → handle mapping lands in M4 alongside the mesh listener that needs the same primitives. The in-channel token path lands in M6.
 
 ## Observability
 

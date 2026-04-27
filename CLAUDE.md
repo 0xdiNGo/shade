@@ -45,7 +45,7 @@ Project docs live in `docs/` (markdown, browsable on GitHub):
 - `docs/Architecture.md` — design
 - `docs/Improvements-Over-Wraith.md` — punchy, cited critique of Wraith design choices and security theater
 - `docs/Roadmap.md` — milestones and status
-- `docs/Operations.md` — deployment / monitoring (stub until M6)
+- `docs/Operations.md` — deployment / monitoring (single-node M3 runbook + shadectl examples; multi-node + Ansible fill in over M4–M6)
 - `docs/Development.md` — toolchain, CI, PR conventions
 
 Update the relevant page in the same PR that introduces the architectural change. At every milestone boundary, flip that milestone to ✅ in `docs/Roadmap.md` and add the relevant section(s) to `docs/Architecture.md`. The Wraith critique should stay punchy but defensible — every claim about Wraith should reference a file (and ideally a line range) in the wraith repo at `/Users/jpreston/code/irc/wraith`.
