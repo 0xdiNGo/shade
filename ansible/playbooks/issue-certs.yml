@@ -1,0 +1,63 @@
+---
+# Issue a per-node cert against the previously-generated CA. The CA
+# private key lives only on the bootstrap node; we run `issue-cert`
+# there, then ship the resulting node cert + key to each target.
+
+- name: Issue per-node certs
+  hosts: shade_nodes
+  gather_facts: false
+  serial: 1
+  tasks:
+    - name: Determine bootstrap node
+      ansible.builtin.set_fact:
+        ca_node: "{{ ca_node | default(groups['shade_nodes'][0]) }}"
+
+    - name: Issue cert on the CA node
+      delegate_to: "{{ ca_node }}"
+      ansible.builtin.command:
+        argv:
+          - "{{ shade_runtime | default('podman') }}"
+          - run
+          - --rm
+          - --volume
+          - "{{ shade_pki_dir }}:/ca:Z"
+          - --volume
+          - "/tmp/shade-{{ shade_node_id }}:/out:Z"
+          - "{{ shade_image | default('ghcr.io/0xdiNGo/shade') }}:{{ shade_image_tag | default('main') }}"
+          - issue-cert
+          - --node-id
+          - "{{ shade_node_id }}"
+          - --ca-dir
+          - /ca
+          - --out-dir
+          - /out
+      become: true
+
+    - name: Pull the issued cert+key back to the control host
+      delegate_to: "{{ ca_node }}"
+      ansible.builtin.fetch:
+        src: "/tmp/shade-{{ shade_node_id }}/{{ item }}"
+        dest: "./pki/{{ shade_node_id }}/{{ item }}"
+        flat: true
+      loop:
+        - node.pem
+        - node.key
+      become: true
+
+    - name: Push CA bundle + node cert + key to the target
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ shade_pki_dir }}/{{ item.dest }}"
+        mode: "{{ item.mode }}"
+      become: true
+      loop:
+        - { src: "./pki/botnet-ca.pem", dest: "botnet-ca.pem", mode: "0644" }
+        - { src: "./pki/{{ shade_node_id }}/node.pem", dest: "node.pem", mode: "0644" }
+        - { src: "./pki/{{ shade_node_id }}/node.key", dest: "node.key", mode: "0600" }
+
+    - name: Wipe the CA-side scratch dir
+      delegate_to: "{{ ca_node }}"
+      ansible.builtin.file:
+        path: "/tmp/shade-{{ shade_node_id }}"
+        state: absent
+      become: true

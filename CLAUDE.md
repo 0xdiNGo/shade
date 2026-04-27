@@ -45,7 +45,8 @@ Project docs live in `docs/` (markdown, browsable on GitHub):
 - `docs/Architecture.md` — design
 - `docs/Improvements-Over-Wraith.md` — punchy, cited critique of Wraith design choices and security theater
 - `docs/Roadmap.md` — milestones and status
-- `docs/Operations.md` — deployment / monitoring (single-node M3 runbook + shadectl examples; multi-node + Ansible fill in over M4–M6)
+- `docs/Operations.md` — deployment / monitoring + Ansible playbooks + cert/PSK rotation runbooks
+- `docs/Threat-Model.md` — adversaries, defended properties, known gaps tracked in Roadmap
 - `docs/Development.md` — toolchain, CI, PR conventions
 
 Update the relevant page in the same PR that introduces the architectural change. At every milestone boundary, flip that milestone to ✅ in `docs/Roadmap.md` and add the relevant section(s) to `docs/Architecture.md`. The Wraith critique should stay punchy but defensible — every claim about Wraith should reference a file (and ideally a line range) in the wraith repo at `/Users/jpreston/code/irc/wraith`.
@@ -60,6 +61,8 @@ Update the relevant page in the same PR that introduces the architectural change
 
 **M4 ✅** — mTLS mesh + last-write-wins gossip. `shade-proto` mesh wire types (`Frame`, `PeerHello`, snapshot + upsert + delete envelopes). `shade-mesh` async length-prefixed frame codec, rustls-based listener + dialer, `PeerHello` handshake binding cert SAN to `node_id`, per-peer connection loop, `MeshHub` orchestrating accepts + dialers + broadcast fan-out. `shade-store::gossip` applies inbound `Upsert` / `Delete` under LWW, with mask delete tombstones (V0002 migration) so deletes survive reorderings. `shade init-ca` / `shade issue-cert` ship Ed25519 self-signed CA + node certs. Daemon spawns the hub when TLS material is on disk; `/readyz`'s `peers_up` mirrors the live atom.
 
-**M5 (next)** — see `docs/Roadmap.md`. role distribution + cookie ops: deterministic `roleidx % botcount` rotation, HMAC-SHA256 cookies for cross-bot op handshakes, mass-op/deop detection.
+**M5 ✅** — Role distribution + cookie ops + mass-op detection. `shade-core::compute_assignment` runs the deterministic `roleidx % botcount` rotation across `[self] + connected_peers`. `shade-core::cookies` mints HMAC-SHA256 tags over typed payloads keyed via HKDF-SHA256 from the mesh PSK. Daemon's `apply_join_policy` only opts when self holds `ROLE_OP` for the channel and emits `NOTICE shade-cookie/<wire>` so peers can verify authorization. `OpObserver` in `shade-bin` tracks observed ops + cookie NOTICEs to flag uncertified ops and detect mass-op floods (sliding 10s window, threshold 5 ops/source). `shade-ircd::SessionEvent` gains a `ModeChanged` variant so the daemon sees every observed mode.
 
-**M6** — see `docs/Roadmap.md`.
+**M6 ✅** — Ansible role at `ansible/roles/shade/` (container-mode via Podman/Docker + systemd notify-type unit), bootstrap-CA + issue-cert + deploy playbooks, vault-sourced secrets through systemd `EnvironmentFile=`. New `compose smoke (ergo + shade)` CI job runs `deploy/smoke.sh` end-to-end on every PR — boots ergo + shade via docker compose, asserts `/readyz` flips `irc_connected: true`, drives the full `/v1` surface (users / channels / masks / audit), tears down. Operator runbook in `docs/Operations.md` covers cert rotation, partition recovery, and node drain. Threat model seeded in `docs/Threat-Model.md`.
+
+**v0.2 backlog** — see `docs/Roadmap.md` § Out of MVP scope: in-channel `/MSG TOKEN` flow, Argon2id login endpoint, native mTLS verification on the admin listener, the remaining chanset toggles + flood thresholds, multi-network IRC.

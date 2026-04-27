@@ -6,7 +6,7 @@ Shade is a clean-slate successor to [Wraith](https://github.com/wraith-org/wrait
 
 ## Status
 
-**Pre-alpha.** M1 (workspace, CI, daemon, store, container image), M2 (IRC client), M3 (domain + admin API + shadectl + auto-op/auto-kick), and M4 (mTLS mesh + LWW gossip + cert helpers) are done. M5 (role distribution + cookie ops) is next. Not for production. Not interoperable with Wraith botnets — and not trying to be.
+**v0.1.** All six MVP milestones are done — workspace + CI + daemon, IRC client, admin API + shadectl, mTLS mesh + LWW gossip, role distribution + cookie ops, Ansible role + ergo end-to-end CI smoke + operator runbook. The known v0.2 items (in-channel `/MSG TOKEN` flow, Argon2id login, native admin-listener mTLS, the remaining chanset toggles) are tracked in [docs/Roadmap.md § Out of MVP scope](Roadmap.md#out-of-mvp-scope-v02). Not interoperable with Wraith botnets — and not trying to be.
 
 ## Where to start
 
@@ -15,8 +15,9 @@ Shade is a clean-slate successor to [Wraith](https://github.com/wraith-org/wrait
 | [Architecture](Architecture.md) | The Shade design: workspace layout, mesh, store, role distribution, cookie ops, auth model. |
 | [Improvements Over Wraith](Improvements-Over-Wraith.md) | Punchy, cited critique of Wraith's design choices and what we replaced them with. |
 | [Roadmap](Roadmap.md) | Milestones, status, what each one demos. |
-| [Operations](Operations.md) | Deployment, monitoring, cert bootstrap. (Stub — fills in as M6 lands.) |
+| [Operations](Operations.md) | Deployment, monitoring, cert bootstrap, Ansible playbooks, runbooks for partition recovery and PSK rotation. |
 | [Development](Development.md) | Local setup, CI pipeline, PR conventions. |
+| [Threat Model](Threat-Model.md) | What Shade defends against, what it doesn't, and what the open security work is. |
 
 ## Repo
 

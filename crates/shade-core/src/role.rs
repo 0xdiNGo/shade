@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// Per-channel role types. The number of bots assigned to each role is
 /// fixed (see [`role_counts`]) and the assignment is computed by sorted
 /// `roleidx % botcount` rotation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[repr(i64)]
 pub enum Role {

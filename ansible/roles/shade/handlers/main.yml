@@ -1,0 +1,11 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Restart shade
+  ansible.builtin.systemd:
+    name: "{{ shade_service_name }}"
+    state: restarted
+  become: true

@@ -67,6 +67,20 @@ jobs:
       - name: shade --help inside the image
         run: docker run --rm shade:ci --help
 
+  compose-smoke:
+    name: compose smoke (ergo + shade)
+    runs-on: ubuntu-latest
+    needs: [docker]
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose up + smoke.sh
+        working-directory: deploy
+        run: ./smoke.sh
+      - name: dump shade logs on failure
+        if: failure()
+        working-directory: deploy
+        run: docker compose logs shade
+
   fuzz:
     name: fuzz parser
     runs-on: ubuntu-latest

@@ -57,16 +57,38 @@ pub async fn run(cfg: Config) -> Result<()> {
     let ready_handle = ReadyHandle::from_arc(readiness.irc_connected_handle());
     let session = Session::spawn(session_config, ready_handle);
     let session_writer = session.writer();
-    let session_task = tokio::spawn(drive_session(
-        session,
-        session_writer.clone(),
-        store.clone(),
-    ));
 
     // Mesh — optional. If the node's TLS material isn't on disk yet,
     // log and stay single-node. This keeps the M3 demo path
     // (docker compose without certs) running unchanged.
     let mesh = setup_mesh(&cfg, &store, &readiness).await?;
+
+    // Build the role context that drives ROLE_OP / cookie decisions
+    // when the mesh is online. Without it the daemon falls back to
+    // M3-style "always op."
+    let role_ctx = match (&mesh, std::env::var(&cfg.mesh.psk_env)) {
+        (Some(hub), Ok(psk)) => Some(RoleContext {
+            node_id: Arc::from(cfg.node.id.as_str()),
+            mesh: hub.clone(),
+            mesh_psk: Arc::from(psk.into_bytes().into_boxed_slice()),
+        }),
+        (Some(_), Err(_)) => {
+            tracing::warn!(
+                env = %cfg.mesh.psk_env,
+                "mesh online but ${} is unset — cookie ops disabled, role decisions still apply",
+                cfg.mesh.psk_env,
+            );
+            None
+        }
+        (None, _) => None,
+    };
+
+    let session_task = tokio::spawn(drive_session(
+        session,
+        session_writer.clone(),
+        store.clone(),
+        role_ctx.clone(),
+    ));
 
     let admin_router = shade_api::admin::router(AdminState {
         readiness: readiness.clone(),
@@ -318,7 +340,19 @@ fn parse_server_addr(s: &str) -> Result<SocketAddr> {
         .ok_or_else(|| anyhow!("no addresses returned for {s}"))
 }
 
-async fn drive_session(mut session: Session, writer: Writer, store: Arc<shade_store::Store>) {
+async fn drive_session(
+    mut session: Session,
+    writer: Writer,
+    store: Arc<shade_store::Store>,
+    role_ctx: Option<RoleContext>,
+) {
+    let mut op_observer = crate::op_observer::OpObserver::new();
+    let observer_ctx = role_ctx
+        .as_ref()
+        .map(|r| crate::op_observer::ObserverContext {
+            node_id: r.node_id.clone(),
+            mesh_psk: r.mesh_psk.clone(),
+        });
     while let Some(evt) = session.next_event().await {
         match evt {
             SessionEvent::Welcomed { nick } => {
@@ -338,12 +372,49 @@ async fn drive_session(mut session: Session, writer: Writer, store: Arc<shade_st
                 apply_join_policy(
                     &writer,
                     &store,
+                    role_ctx.as_ref(),
                     &channel,
                     &nick,
                     user.as_deref(),
                     host.as_deref(),
                 )
                 .await;
+            }
+            SessionEvent::ModeChanged {
+                target,
+                by,
+                modes,
+                args,
+            } => {
+                // Track every observed +o for cookie verification +
+                // mass-op detection. Walk the mode chars + args side
+                // by side; only +o consumes an arg here, since other
+                // arg-bearing modes (b/e/I/k/l) aren't ops.
+                if !target.starts_with('#') && !target.starts_with('&') {
+                    continue;
+                }
+                let now = shade_core::now_ms();
+                let mut adding = true;
+                let mut arg_idx = 0;
+                for c in modes.chars() {
+                    match c {
+                        '+' => adding = true,
+                        '-' => adding = false,
+                        'o' if adding => {
+                            if let Some(target_nick) = args.get(arg_idx) {
+                                op_observer.record_op(&target, target_nick, &by, now);
+                            }
+                            arg_idx += 1;
+                        }
+                        'o' | 'v' => {
+                            arg_idx += 1;
+                        }
+                        'b' | 'e' | 'I' | 'k' => arg_idx += 1,
+                        'l' if adding => arg_idx += 1,
+                        _ => {}
+                    }
+                }
+                op_observer.maybe_sweep(now);
             }
             SessionEvent::SaslOutcome { succeeded } => {
                 tracing::info!(succeeded, "irc: sasl outcome");
@@ -358,8 +429,34 @@ async fn drive_session(mut session: Session, writer: Writer, store: Arc<shade_st
                     }
                 }
             }
-            SessionEvent::Notice { .. } => {}
+            SessionEvent::Notice { target, body, .. } => {
+                if let (Some(wire), Some(ctx)) = (
+                    crate::op_observer::extract_cookie_wire(&body),
+                    observer_ctx.as_ref(),
+                ) {
+                    let now = shade_core::now_ms();
+                    op_observer.record_cookie_notice(&target, wire, ctx, now);
+                }
+            }
         }
+    }
+}
+
+/// Per-channel role context the daemon needs to make op decisions.
+#[derive(Clone)]
+pub struct RoleContext {
+    pub node_id: Arc<str>,
+    pub mesh: Arc<shade_mesh::MeshHub>,
+    /// HKDF-input keying material for cookie derivation (the mesh PSK).
+    pub mesh_psk: Arc<[u8]>,
+}
+
+impl std::fmt::Debug for RoleContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoleContext")
+            .field("node_id", &self.node_id)
+            .field("psk_len", &self.mesh_psk.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -368,14 +465,21 @@ async fn drive_session(mut session: Session, writer: Writer, store: Arc<shade_st
 /// 1. Check the channel's ban list — if the peer's hostmask matches, KICK
 ///    them with the ban reason.
 /// 2. Otherwise, look the peer up by hostmask (passive identification).
-///    If they're a known user with `+o` in this channel, MODE +o them.
+///    If they're a known user with `+o` in this channel:
+///    - **With mesh online**: compute the role assignment from
+///      `[self] + connected_peers`. Issue the MODE only if we hold
+///      `ROLE_OP` for this channel; otherwise log and let the holder
+///      issue it. Embed an HMAC-SHA256 cookie NOTICE so other Shade
+///      bots can verify the authorization.
+///    - **Single-node** (no `RoleContext`): always issue. Same
+///      behavior as M3 for the dev-only single-bot demo.
 ///
 /// All store calls are short-lived synchronous SQLite reads; we do them
-/// inline. M5 will route op decisions through the role-distribution layer
-/// so only the bot holding `ROLE_OP` actually sets the mode.
+/// inline.
 async fn apply_join_policy(
     writer: &Writer,
     store: &Arc<shade_store::Store>,
+    role_ctx: Option<&RoleContext>,
     channel: &str,
     nick: &str,
     user: Option<&str>,
@@ -430,14 +534,63 @@ async fn apply_join_policy(
         }
     };
 
-    if chan_flags.contains_letter(shade_core::flags::USER_OP) {
+    if !chan_flags.contains_letter(shade_core::flags::USER_OP) {
+        return;
+    }
+
+    // Decide: do we hold ROLE_OP for this channel? When the mesh is
+    // online, only the role holder issues. When not, fall back to
+    // "always op" so the M3 single-node demo path still works.
+    if let Some(ctx) = role_ctx {
+        let mut peers: Vec<String> = ctx.mesh.peer_node_ids().await;
+        peers.push(ctx.node_id.to_string());
+        let assignment = shade_core::compute_assignment(&peers);
+        let i_hold_op = assignment
+            .get(&shade_core::Role::Op)
+            .is_some_and(|holders| holders.iter().any(|h| h.as_str() == &*ctx.node_id));
+        if !i_hold_op {
+            tracing::debug!(
+                %channel, %nick,
+                holders = ?assignment.get(&shade_core::Role::Op),
+                "irc: not the ROLE_OP holder for this channel; deferring"
+            );
+            return;
+        }
+        // Issue the op + cookie NOTICE.
+        issue_op_with_cookie(writer, ctx, channel, nick).await;
+    } else {
         let line = format!("MODE {channel} +o {nick}");
         if let Err(err) = writer.send(line).await {
             tracing::warn!(%err, %channel, %nick, "irc: auto-op send failed");
         } else {
-            tracing::info!(%channel, %nick, handle = %user_record.handle, "irc: auto-opped");
+            tracing::info!(%channel, %nick, handle = %user_record.handle, "irc: auto-opped (single-node)");
         }
     }
+}
+
+/// Issue `MODE +o nick` plus a `NOTICE shade-cookie/<wire>` so other
+/// Shade bots on the channel can cryptographically verify the op was
+/// authorized by the deterministic ROLE_OP holder.
+async fn issue_op_with_cookie(writer: &Writer, ctx: &RoleContext, channel: &str, nick: &str) {
+    let key = shade_core::derive_channel_key(&ctx.mesh_psk, channel);
+    let cookie = shade_core::Cookie::new((*ctx.node_id).to_owned(), nick.to_owned());
+    let Some(wire) = shade_core::cookies::make(&cookie, &key) else {
+        tracing::warn!(%channel, %nick, "irc: failed to mint cookie; not opping");
+        return;
+    };
+    // Op first, then proof. Other bots seeing the op without a matching
+    // cookie within ~1s will mark it as suspicious in M5 PR3.
+    let mode_line = format!("MODE {channel} +o {nick}");
+    let cookie_line = format!("NOTICE {channel} :shade-cookie/{wire}");
+    if let Err(err) = writer.send(mode_line).await {
+        tracing::warn!(%err, %channel, %nick, "irc: auto-op send failed");
+        return;
+    }
+    if let Err(err) = writer.send(cookie_line).await {
+        tracing::warn!(%err, %channel, %nick, "irc: cookie NOTICE send failed");
+        return;
+    }
+    tracing::info!(%channel, %nick, "irc: auto-opped with cookie (ROLE_OP holder)");
 }
 
 /// Reconstruct a `nick!user@host` string for hostmask matching. Falls

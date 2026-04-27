@@ -128,6 +128,16 @@ pub enum SessionEvent {
     /// Underlying connection dropped; the runner will reconnect after
     /// `delay`.
     Disconnected { reason: String, delay: Duration },
+    /// Channel mode change observed. The session machine has already
+    /// applied PREFIX-mode changes to its in-memory member state; this
+    /// event is for consumers that need to react (audit, op-cookie
+    /// verification, mass-op detection).
+    ModeChanged {
+        target: String,
+        by: String,
+        modes: String,
+        args: Vec<String>,
+    },
 }
 
 /// Spawned session runner.
@@ -437,12 +447,27 @@ impl<'a> Runner<'a> {
                     .send(SessionEvent::Notice { from, target, body })
                     .await;
             }
+            StateEvent::ModeChanged {
+                target,
+                by,
+                modes,
+                args,
+            } => {
+                let _ = self
+                    .events
+                    .send(SessionEvent::ModeChanged {
+                        target,
+                        by,
+                        modes,
+                        args,
+                    })
+                    .await;
+            }
             StateEvent::Parted { .. }
             | StateEvent::Kicked { .. }
             | StateEvent::NickChanged { .. }
             | StateEvent::Quit { .. }
-            | StateEvent::TopicSet { .. }
-            | StateEvent::ModeChanged { .. } => {
+            | StateEvent::TopicSet { .. } => {
                 // Tracked in ServerState; no SessionEvent surface yet.
             }
         }

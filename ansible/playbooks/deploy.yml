@@ -1,0 +1,6 @@
+---
+- name: Deploy Shade across the mesh
+  hosts: shade_nodes
+  gather_facts: true
+  roles:
+    - role: shade

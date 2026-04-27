@@ -9,16 +9,20 @@
 
 pub mod audit;
 pub mod channel;
+pub mod cookies;
 pub mod flags;
 pub mod mask;
 pub mod role;
+pub mod role_assignment;
 pub mod time;
 pub mod user;
 
 pub use audit::{AuditEntry, AuditId, AuditSource};
 pub use channel::{Channel, ChannelId, ChannelSettings, ChannelUserFlags, NewChannel};
+pub use cookies::{derive_channel_key, Cookie, CookieError, ReplayGuard};
 pub use flags::{FlagSet, FlagSetParseError};
 pub use mask::{Mask, MaskId, MaskKind, NewMask};
 pub use role::{slots_for, Role, ROLE_COUNTS};
+pub use role_assignment::{compute_assignment, holds_role};
 pub use time::now_ms;
 pub use user::{NewUser, User, UserId};
