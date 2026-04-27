@@ -31,10 +31,11 @@ Default git author for this repo is set locally to `0xdiNGo <1714530+0xdiNGo@use
 
 ## Conventions
 
-- All work via PRs. Self-merge after CI green is acceptable on master during early milestones (M1–M3).
+- All work via PRs. Squash-merge with `--delete-branch` after CI green; auto-merge (`gh pr merge --auto`) is enabled on the repo and `master` is branch-protected to require `rustfmt`, `clippy`, `build + test`, and `docker build + smoke` before merge. (`fuzz parser` is run on every PR but not yet a required check.)
 - `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` must pass before merge.
 - Conventional Commits style: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`.
 - No real-name attribution anywhere (see Identity rule above).
+- Architectural changes update the relevant `docs/` page in the same PR.
 
 ## Documentation
 
@@ -48,3 +49,11 @@ Project docs live in `docs/` (markdown, browsable on GitHub):
 - `docs/Development.md` — toolchain, CI, PR conventions
 
 Update the relevant page in the same PR that introduces the architectural change. At every milestone boundary, flip that milestone to ✅ in `docs/Roadmap.md` and add the relevant section(s) to `docs/Architecture.md`. The Wraith critique should stay punchy but defensible — every claim about Wraith should reference a file (and ideally a line range) in the wraith repo at `/Users/jpreston/code/irc/wraith`.
+
+## Current state (snapshot — keep this current at milestone boundaries)
+
+**M1 ✅** scaffold, CI, daemon, store, container.
+
+**M2 (in progress)** — IRC client. 6 of 7 PRs landed or queued (parser, fuzz, connection, caps + SASL, state machine, mode queue). The last M2 PR is the **wire-up**: a `shade-ircd::session` async loop that ties Connection + CapNegotiation + SASL + ServerState + ModeQueue together, plus integration in `shade-bin/daemon.rs` (flip `/readyz`'s `irc_connected` on RPL_WELCOME, `!ping → pong` handler), plus an `ergo` service in `deploy/compose.yaml` so `docker compose up` is the M2 demo.
+
+**M3–M6** — see `docs/Roadmap.md`.
