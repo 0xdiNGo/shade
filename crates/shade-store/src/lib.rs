@@ -9,7 +9,11 @@ use std::path::{Path, PathBuf};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
+pub mod audit;
+pub mod channels;
+pub mod masks;
 mod migrations;
+pub mod users;
 
 /// SQLite-backed Shade store.
 pub struct Store {
