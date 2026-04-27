@@ -60,6 +60,9 @@ pub fn upsert_in_tx(
         None => (UserId::new(), now),
     };
 
+    // Local writes always win — no LWW gate here. Remote-origin upserts
+    // apply through `crate::gossip::apply_user_upsert`, which carries the
+    // LWW comparison.
     tx.execute(
         "INSERT INTO users
             (id, handle, password_hash, is_bot, global_flags, comment,
@@ -73,10 +76,7 @@ pub fn upsert_in_tx(
             global_flags  = excluded.global_flags,
             comment       = excluded.comment,
             updated_at    = excluded.updated_at,
-            origin_node   = excluded.origin_node
-         WHERE users.updated_at < excluded.updated_at
-            OR (users.updated_at = excluded.updated_at
-                AND users.origin_node > excluded.origin_node)",
+            origin_node   = excluded.origin_node",
         params![
             id.as_bytes().to_vec(),
             &new_user.handle,

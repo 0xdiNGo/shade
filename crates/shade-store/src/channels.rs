@@ -36,16 +36,15 @@ pub fn upsert(
         None => (ChannelId::new(), now),
     };
 
+    // Local writes always win. Remote-origin upserts apply through
+    // `crate::gossip::apply_channel_upsert`, which gates by LWW.
     tx.execute(
         "INSERT INTO channels (id, name, created_at, updated_at, origin_node)
          VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(id) DO UPDATE SET
             name        = excluded.name,
             updated_at  = excluded.updated_at,
-            origin_node = excluded.origin_node
-         WHERE channels.updated_at < excluded.updated_at
-            OR (channels.updated_at = excluded.updated_at
-                AND channels.origin_node > excluded.origin_node)",
+            origin_node = excluded.origin_node",
         params![
             id.as_bytes().to_vec(),
             &new_channel.name,
@@ -208,10 +207,7 @@ pub fn upsert_settings(
             key_prot    = excluded.key_prot,
             topic_saved = excluded.topic_saved,
             updated_at  = excluded.updated_at,
-            origin_node = excluded.origin_node
-         WHERE channel_settings.updated_at < excluded.updated_at
-            OR (channel_settings.updated_at = excluded.updated_at
-                AND channel_settings.origin_node > excluded.origin_node)",
+            origin_node = excluded.origin_node",
         params![
             settings.channel_id.as_bytes().to_vec(),
             i64::from_le_bytes(settings.flags.bits().to_le_bytes()),
@@ -287,10 +283,7 @@ pub fn upsert_user_flags(
          ON CONFLICT(channel_id, user_id) DO UPDATE SET
             flags       = excluded.flags,
             updated_at  = excluded.updated_at,
-            origin_node = excluded.origin_node
-         WHERE channel_user_flags.updated_at < excluded.updated_at
-            OR (channel_user_flags.updated_at = excluded.updated_at
-                AND channel_user_flags.origin_node > excluded.origin_node)",
+            origin_node = excluded.origin_node",
         params![
             channel_id.as_bytes().to_vec(),
             user_id.as_bytes().to_vec(),

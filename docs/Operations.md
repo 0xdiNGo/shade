@@ -92,9 +92,27 @@ shade mask add "#shade-test" '*!*@evil.example' --reason flooding
 shade audit --limit 20
 ```
 
-## Coming in M4–M6
+### Bringing the mesh online (M4)
 
-* **M4** — mTLS mesh listener + dialer, snapshot + delta gossip. `peers_up` flips, replicated tables actually replicate.
+```sh
+# On the first node (generates the botnet CA):
+shade init-ca       --out-dir /etc/shade/pki
+
+# Per-node cert issuance (run for each node_id):
+shade issue-cert    --node-id shade-iad-01 \
+                    --ca-dir   /etc/shade/pki \
+                    --out-dir  /etc/shade/pki
+
+# /etc/shade/pki/{botnet-ca.pem, node.pem, node.key} match the
+# defaults in deploy/shade.example.toml.
+```
+
+Restart `shade run`. The daemon will detect the PEM trio and bring the mesh online; `[mesh].peers` in the config drives outbound dial attempts. `/readyz` flips `peers_up: true` as soon as one peer is connected. Without the PEM trio, the daemon stays single-node and logs a one-line warning — the M3 demo path keeps working.
+
+For multi-node tests today, copy `botnet-ca.pem` to every node, run `issue-cert` on the side that holds the CA key, and rsync the resulting `node.pem` + `node.key` to the target node.
+
+## Coming in M5–M6
+
 * **M5** — Role distribution + cookie ops. `ROLE_OP` rotation chooses *which* node sets the mode; HMAC-SHA256 cookies prevent replay between nodes.
 * **M6** — Ansible role at `ansible/roles/shade/` with `container` and `systemd` deploy modes; Vault layout for secrets; podman quadlet files; full operator runbook (rotate mesh PSK, replace a node cert, drain a node, recover from a partition).
 

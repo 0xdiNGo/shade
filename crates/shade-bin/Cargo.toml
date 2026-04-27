@@ -21,6 +21,8 @@ anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
 figment.workspace = true
+pem = "3.0"
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -34,9 +36,9 @@ ureq.workspace = true
 shade-api = { path = "../shade-api" }
 shade-core = { path = "../shade-core" }
 shade-ircd = { path = "../shade-ircd" }
+shade-mesh = { path = "../shade-mesh" }
 shade-store = { path = "../shade-store" }
 
 [dev-dependencies]
-pem = "3.0"
 tempfile.workspace = true
 x509-parser.workspace = true

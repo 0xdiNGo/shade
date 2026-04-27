@@ -64,6 +64,14 @@ impl ReadinessProbes {
     pub fn irc_connected_handle(&self) -> Arc<AtomicBool> {
         self.irc_connected.clone()
     }
+
+    /// Cheap clone of just the `peers_up` flag. The mesh hub maintains
+    /// its own atomic and the daemon mirrors it into this one for the
+    /// `/readyz` probe.
+    #[must_use]
+    pub fn peers_up_handle(&self) -> Arc<AtomicBool> {
+        self.peers_up.clone()
+    }
 }
 
 #[derive(Clone, Debug)]

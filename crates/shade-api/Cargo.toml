@@ -26,6 +26,8 @@ tracing.workspace = true
 ulid.workspace = true
 
 shade-core = { path = "../shade-core" }
+shade-mesh = { path = "../shade-mesh" }
+shade-proto = { path = "../shade-proto" }
 shade-store = { path = "../shade-store" }
 
 [dev-dependencies]

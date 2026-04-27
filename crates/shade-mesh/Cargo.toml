@@ -21,7 +21,9 @@ tokio-rustls.workspace = true
 tracing.workspace = true
 x509-parser.workspace = true
 
+shade-core = { path = "../shade-core" }
 shade-proto = { path = "../shade-proto" }
+shade-store = { path = "../shade-store" }
 
 [dev-dependencies]
 rcgen.workspace = true
