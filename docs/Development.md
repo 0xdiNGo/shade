@@ -40,16 +40,37 @@ Send `SIGTERM` (or Ctrl-C) to shut down cleanly. Logs go to stdout; default is J
 
 ## CLI subcommands
 
+The `shade` binary is both the daemon and the operator CLI.
+
+**Daemon and admin:**
+
 ```
 shade run            Start the Shade daemon
-shade init-ca        Generate a new botnet certificate authority
-shade issue-cert     Issue a node certificate signed by the botnet CA
-shade migrate        Run pending database migrations against the configured data directory
-shade check-config   Parse the config file and print the normalized result as JSON
-shade dump-state     Dump the current SQLite state as JSON
+shade init-ca        Generate a new botnet certificate authority   (stub — lands in M4/M6)
+shade issue-cert     Issue a node certificate signed by the CA     (stub — lands in M4/M6)
+shade migrate        Run pending database migrations
+shade check-config   Print the normalized config as JSON
+shade dump-state     Dump the SQLite state as JSON                 (stub — lands in M3.x/M4)
 ```
 
-`run`, `init-ca`, `issue-cert`, `dump-state` are stubbed in M1 and fill in over M2–M6. `migrate` and `check-config` work today.
+**`shadectl` operator subcommands** (talk to a running daemon's `/v1` admin API):
+
+```
+shade users      list / show / upsert / delete / chattr
+shade channels   list / show / upsert / delete
+shade chanset    get / put
+shade chattr     <handle> <channel> <flag-diff>
+shade mask       list / add / remove
+shade audit      [--limit N] [--actor substring]
+```
+
+Common flags on every shadectl subcommand:
+
+* `--base URL` — admin API endpoint (defaults to `admin.listen` from the config file).
+* `--actor STR` — `X-Actor` header for audit attribution (defaults to `cli:$USER`).
+* `--pretty` — multi-line indented JSON output.
+
+See [Operations.md](Operations.md#shadectl-operator-cli) for example invocations and the M3 demo path.
 
 ## Container builds
 
@@ -66,12 +87,15 @@ The Dockerfile is two-stage: builder (`rust:alpine`, target `x86_64-unknown-linu
 
 ## CI pipeline
 
-Defined in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Four jobs:
+Defined in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Five jobs:
 
-1. **rustfmt** — `cargo fmt --all --check`
-2. **clippy** — `cargo clippy --workspace --all-targets -- -D warnings`
-3. **build + test** — `cargo build && cargo test`, with `Swatinem/rust-cache` warmed
-4. **docker build + smoke** — builds the image via buildx (GHA cache), then runs `shade --version` and `shade --help` inside it. Runs only after the first three pass.
+1. **rustfmt** — `cargo fmt --all --check`.
+2. **clippy** — `cargo clippy --workspace --all-targets -- -D warnings`.
+3. **build + test** — `cargo build && cargo test`, with `Swatinem/rust-cache` warmed.
+4. **docker build + smoke** — builds the image via buildx (GHA cache), runs `shade --version` and `shade --help` inside it. Runs after the first three pass.
+5. **fuzz parser** — runs `cargo +nightly fuzz run irc_parser` for 5 minutes against the seed corpus. Runs after `build + test` passes.
+
+Branch protection on `master` requires the first four checks; `fuzz parser` runs on every PR but is not a blocking check yet.
 
 Concurrency group cancels stale runs on force-push.
 

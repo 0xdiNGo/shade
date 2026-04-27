@@ -6,7 +6,7 @@ Shade is a clean-slate successor to [Wraith](https://github.com/wraith-org/wrait
 
 ## Status
 
-**Pre-alpha.** M1 (workspace, CI, daemon, store, container image) is done. M2 (IRC client) is next. Not for production. Not interoperable with Wraith botnets — and not trying to be.
+**Pre-alpha.** M1 (workspace, CI, daemon, store, container image), M2 (IRC client), and M3 (domain + admin API + shadectl + auto-op/auto-kick) are done. M4 (mTLS mesh + gossip sync) is next. Not for production. Not interoperable with Wraith botnets — and not trying to be.
 
 ## Where to start
 
