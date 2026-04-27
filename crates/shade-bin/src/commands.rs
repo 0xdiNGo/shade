@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use crate::cli::{Cli, Command};
 use crate::config::Config;
 use crate::daemon;
+use crate::pki;
 use crate::shadectl;
 
 pub fn dispatch(cli: &Cli) -> Result<()> {
@@ -47,12 +48,12 @@ fn run(config_path: &Path) -> Result<()> {
     runtime.block_on(daemon::run(cfg))
 }
 
-fn init_ca(_out_dir: &Path) -> Result<()> {
-    bail!("`shade init-ca` is not yet implemented")
+fn init_ca(out_dir: &Path) -> Result<()> {
+    pki::init_ca(out_dir)
 }
 
-fn issue_cert(_node_id: &str, _ca_dir: &Path, _out_dir: &Path) -> Result<()> {
-    bail!("`shade issue-cert` is not yet implemented")
+fn issue_cert(node_id: &str, ca_dir: &Path, out_dir: &Path) -> Result<()> {
+    pki::issue_cert(node_id, ca_dir, out_dir)
 }
 
 fn migrate(config_path: &Path) -> Result<()> {
