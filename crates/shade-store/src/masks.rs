@@ -124,14 +124,61 @@ pub fn match_ban(
     Ok(bans.into_iter().find(|m| irc_glob_match(&m.mask, host)))
 }
 
-/// Delete a mask by id.
-pub fn delete(store: &Store, id: MaskId) -> Result<bool, StoreError> {
-    let conn = store.conn()?;
-    let n = conn.execute(
+/// Delete a mask by id and record a tombstone for LWW gossip.
+pub fn delete(store: &Store, id: MaskId, origin_node: &str) -> Result<bool, StoreError> {
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    let now = now_ms();
+    let n = tx.execute(
         "DELETE FROM masklists WHERE id = ?1",
         params![id.as_bytes().to_vec()],
     )?;
+    // Always record a tombstone — even if the row was already gone,
+    // this lets a remote Upsert arriving later be rejected.
+    tx.execute(
+        "INSERT INTO mask_tombstones (id, deleted_at, origin_node)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET
+            deleted_at  = excluded.deleted_at,
+            origin_node = excluded.origin_node
+         WHERE mask_tombstones.deleted_at < excluded.deleted_at
+            OR (mask_tombstones.deleted_at = excluded.deleted_at
+                AND mask_tombstones.origin_node > excluded.origin_node)",
+        params![id.as_bytes().to_vec(), now, origin_node],
+    )?;
+    tx.commit()?;
     Ok(n > 0)
+}
+
+/// List masks with `updated_at > since_ts`, oldest-first. Used by
+/// snapshot streaming.
+pub fn list_since(store: &Store, since_ts: i64) -> Result<Vec<Mask>, StoreError> {
+    let conn = store.conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, channel_id, mask, reason, set_by, set_at,
+                expires_at, sticky, updated_at, origin_node
+         FROM masklists
+         WHERE updated_at > ?1
+         ORDER BY updated_at",
+    )?;
+    let rows: Vec<Mask> = stmt
+        .query_map(params![since_ts], |row| Ok(map_row(row)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Look up a mask tombstone by id. Returns the
+/// `(deleted_at, origin_node)` pair if present.
+pub fn tombstone_for(store: &Store, id: MaskId) -> Result<Option<(i64, String)>, StoreError> {
+    let conn = store.conn()?;
+    let row = conn
+        .query_row(
+            "SELECT deleted_at, origin_node FROM mask_tombstones WHERE id = ?1",
+            params![id.as_bytes().to_vec()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    Ok(row)
 }
 
 fn map_row(row: &rusqlite::Row<'_>) -> Mask {
@@ -349,7 +396,10 @@ mod tests {
             sticky: false,
         };
         let mask = insert(&store, &nm, "node-a").unwrap();
-        assert!(delete(&store, mask.id).unwrap());
+        assert!(delete(&store, mask.id, "node-a").unwrap());
         assert!(get_by_id(&store, mask.id).unwrap().is_none());
+        // Tombstone is recorded so a stale remote upsert can be rejected.
+        let ts = tombstone_for(&store, mask.id).unwrap();
+        assert!(ts.is_some(), "expected a tombstone");
     }
 }

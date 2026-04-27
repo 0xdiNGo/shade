@@ -22,6 +22,8 @@ use shade_core::{
     AuditEntry, AuditSource, Channel, ChannelSettings, ChannelUserFlags, FlagSet, Mask, MaskKind,
     NewChannel, NewMask, NewUser, User,
 };
+use shade_mesh::MeshHub;
+use shade_proto::{Delete, DeleteKind, Upsert, UpsertKind};
 use shade_store::Store;
 
 /// Shared state for the admin API.
@@ -31,13 +33,38 @@ pub struct ApiState {
     /// Node ID used as `origin_node` on every write and as the default
     /// `actor` on every audit entry when no `X-Actor` header is supplied.
     pub node_id: Arc<str>,
+    /// Optional mesh hub. When set, every mutation route broadcasts an
+    /// `Upsert` / `Delete` after the local store write so peers
+    /// receive the change. `None` keeps the API single-node-friendly
+    /// for tests and the M3 demo.
+    pub mesh: Option<Arc<MeshHub>>,
 }
 
 impl std::fmt::Debug for ApiState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApiState")
             .field("node_id", &self.node_id)
+            .field("mesh_attached", &self.mesh.is_some())
             .finish_non_exhaustive()
+    }
+}
+
+impl ApiState {
+    async fn broadcast_upsert(&self, kind: UpsertKind) {
+        if let Some(mesh) = &self.mesh {
+            mesh.broadcast_upsert(Upsert { kind }).await;
+        }
+    }
+
+    async fn broadcast_delete(&self, kind: DeleteKind) {
+        if let Some(mesh) = &self.mesh {
+            mesh.broadcast_delete(Delete {
+                kind,
+                updated_at: shade_core::now_ms(),
+                origin_node: (*self.node_id).to_owned(),
+            })
+            .await;
+        }
     }
 }
 
@@ -161,6 +188,7 @@ async fn create_user(
         Some(&user.handle),
         &serde_json::json!({ "id": user.id.to_string() }),
     );
+    state.broadcast_upsert(UpsertKind::User(user.clone())).await;
     Ok((StatusCode::CREATED, Json(user)))
 }
 
@@ -251,6 +279,9 @@ async fn patch_user(
         Some(&updated.handle),
         &serde_json::json!({ "id": updated.id.to_string() }),
     );
+    state
+        .broadcast_upsert(UpsertKind::User(updated.clone()))
+        .await;
     Ok(Json(updated))
 }
 
@@ -272,6 +303,9 @@ async fn delete_user(
         Some(&user.handle),
         &serde_json::json!({ "id": user.id.to_string() }),
     );
+    state
+        .broadcast_delete(DeleteKind::User { id: user.id })
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -299,6 +333,9 @@ async fn create_channel(
         Some(&chan.name),
         &serde_json::json!({ "id": chan.id.to_string() }),
     );
+    state
+        .broadcast_upsert(UpsertKind::Channel(chan.clone()))
+        .await;
     Ok((StatusCode::CREATED, Json(chan)))
 }
 
@@ -329,6 +366,9 @@ async fn delete_channel(
         Some(&chan.name),
         &serde_json::json!({ "id": chan.id.to_string() }),
     );
+    state
+        .broadcast_delete(DeleteKind::Channel { id: chan.id })
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -410,6 +450,9 @@ async fn put_channel_settings(
         Some(&chan.name),
         &serde_json::json!({ "flags": written.flags.to_string() }),
     );
+    state
+        .broadcast_upsert(UpsertKind::ChannelSettings(written.clone()))
+        .await;
     Ok(Json(written))
 }
 
@@ -467,6 +510,9 @@ async fn put_channel_user_flags(
         Some(&format!("{}:{}", chan.name, user.handle)),
         &serde_json::json!({ "flags": row.flags.to_string() }),
     );
+    state
+        .broadcast_upsert(UpsertKind::ChannelUserFlags(row.clone()))
+        .await;
     Ok(Json(row))
 }
 
@@ -490,6 +536,12 @@ async fn delete_channel_user_flags(
         Some(&format!("{}:{}", chan.name, user.handle)),
         &serde_json::Value::Null,
     );
+    state
+        .broadcast_delete(DeleteKind::ChannelUserFlags {
+            channel_id: chan.id,
+            user_id: user.id,
+        })
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -561,6 +613,9 @@ async fn create_channel_mask(
         Some(&format!("{}:{}", chan.name, written.mask)),
         &serde_json::json!({ "id": written.id.0.to_string(), "kind": written.kind }),
     );
+    state
+        .broadcast_upsert(UpsertKind::Mask(written.clone()))
+        .await;
     Ok((StatusCode::CREATED, Json(written)))
 }
 
@@ -573,7 +628,7 @@ async fn delete_mask(
         .map_err(|e| ApiError::BadRequest(format!("invalid mask id: {e}")))?;
     let mask_id = shade_core::MaskId(parsed);
     let mask = shade_store::masks::get_by_id(&state.store, mask_id)?.ok_or(ApiError::NotFound)?;
-    let deleted = shade_store::masks::delete(&state.store, mask_id)?;
+    let deleted = shade_store::masks::delete(&state.store, mask_id, &state.node_id)?;
     if !deleted {
         return Err(ApiError::NotFound);
     }
@@ -584,6 +639,9 @@ async fn delete_mask(
         Some(&mask.mask),
         &serde_json::json!({ "id": id, "kind": mask.kind }),
     );
+    state
+        .broadcast_delete(DeleteKind::Mask { id: mask_id })
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -624,6 +682,7 @@ mod tests {
         ApiState {
             store: Arc::new(store),
             node_id: Arc::from("node-test"),
+            mesh: None,
         }
     }
 

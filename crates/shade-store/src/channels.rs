@@ -36,6 +36,8 @@ pub fn upsert(
         None => (ChannelId::new(), now),
     };
 
+    // Local writes always win. Remote-origin upserts apply through
+    // `crate::gossip::apply_channel_upsert`, which gates by LWW.
     tx.execute(
         "INSERT INTO channels (id, name, created_at, updated_at, origin_node)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -72,6 +74,60 @@ pub fn get_by_id(store: &Store, id: ChannelId) -> Result<Option<Channel>, StoreE
 pub fn get_by_name(store: &Store, name: &str) -> Result<Option<Channel>, StoreError> {
     let conn = store.conn()?;
     fetch_channel(&conn, "name = ?1", params![name])
+}
+
+/// List channels with `updated_at > since_ts`, oldest-first. Used by
+/// snapshot streaming.
+pub fn list_since(store: &Store, since_ts: i64) -> Result<Vec<Channel>, StoreError> {
+    let conn = store.conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, created_at, updated_at, origin_node
+         FROM channels
+         WHERE updated_at > ?1
+         ORDER BY updated_at",
+    )?;
+    let rows = stmt
+        .query_map(params![since_ts], |row| Ok(map_channel_row(row)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// List channel_settings rows with `updated_at > since_ts`, oldest-first.
+pub fn list_settings_since(
+    store: &Store,
+    since_ts: i64,
+) -> Result<Vec<ChannelSettings>, StoreError> {
+    let conn = store.conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT channel_id, flags, mode_pls, mode_mns, limit_prot,
+                key_prot, topic_saved, updated_at, origin_node
+         FROM channel_settings
+         WHERE updated_at > ?1
+         ORDER BY updated_at",
+    )?;
+    let rows = stmt
+        .query_map(params![since_ts], |row| Ok(map_settings_row(row)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// List channel_user_flags rows with `updated_at > since_ts`,
+/// oldest-first.
+pub fn list_user_flags_since(
+    store: &Store,
+    since_ts: i64,
+) -> Result<Vec<ChannelUserFlags>, StoreError> {
+    let conn = store.conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT channel_id, user_id, flags, updated_at, origin_node
+         FROM channel_user_flags
+         WHERE updated_at > ?1
+         ORDER BY updated_at",
+    )?;
+    let rows = stmt
+        .query_map(params![since_ts], |row| Ok(map_user_flags_row(row)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 /// List channels, ordered by name.

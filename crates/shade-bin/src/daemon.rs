@@ -1,10 +1,12 @@
 //! `shade run` async entry point.
 //!
-//! Wires up tracing, opens the SQLite store, spawns the IRC session, and
-//! serves the admin and metrics HTTP listeners. The mesh ships in M4; until
-//! it does, `peers_up` stays false and `/readyz` reports 503 until M4 lands.
+//! Wires up tracing, opens the SQLite store, spawns the IRC session, brings
+//! the mTLS mesh online (when the node's TLS material is present), and
+//! serves the admin and metrics HTTP listeners.
 
+use std::fs;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -14,8 +16,9 @@ use shade_ircd::{
     BackoffConfig, ConnectionConfig, ReadyHandle, SaslMechanism, Session, SessionConfig,
     SessionEvent, TlsMode, WriteRateConfig, Writer,
 };
+use shade_mesh::{MeshHub, MeshHubConfig, MeshPeer};
 
-use crate::config::{Config, NetworkConfig, SaslConfig};
+use crate::config::{Config, NetworkConfig, SaslConfig, TlsConfig};
 use crate::telemetry;
 
 /// Run the Shade daemon until it receives Ctrl-C or SIGTERM.
@@ -60,12 +63,18 @@ pub async fn run(cfg: Config) -> Result<()> {
         store.clone(),
     ));
 
+    // Mesh — optional. If the node's TLS material isn't on disk yet,
+    // log and stay single-node. This keeps the M3 demo path
+    // (docker compose without certs) running unchanged.
+    let mesh = setup_mesh(&cfg, &store, &readiness).await?;
+
     let admin_router = shade_api::admin::router(AdminState {
         readiness: readiness.clone(),
     })
     .merge(shade_api::v1::router(ApiState {
         store: store.clone(),
         node_id: Arc::from(cfg.node.id.as_str()),
+        mesh: mesh.clone(),
     }));
     let metrics_router = shade_api::metrics::router(metrics_handle);
 
@@ -78,8 +87,134 @@ pub async fn run(cfg: Config) -> Result<()> {
     admin.abort();
     metrics.abort();
     session_task.abort();
+    if let Some(hub) = mesh {
+        if let Ok(hub) = Arc::try_unwrap(hub) {
+            hub.shutdown();
+        }
+    }
 
     Ok(())
+}
+
+async fn setup_mesh(
+    cfg: &Config,
+    store: &Arc<shade_store::Store>,
+    readiness: &ReadinessProbes,
+) -> Result<Option<Arc<MeshHub>>> {
+    let tls = &cfg.node.tls;
+    if !pem_files_present(tls) {
+        tracing::warn!(
+            ca_bundle = %tls.ca_bundle.display(),
+            cert = %tls.cert.display(),
+            key = %tls.key.display(),
+            "mesh: TLS material missing — staying single-node. \
+             run `shade init-ca` + `shade issue-cert --node-id {}` to bring mesh online.",
+            cfg.node.id,
+        );
+        return Ok(None);
+    }
+
+    let ca_bundle = read_pem_certs(&tls.ca_bundle)?;
+    let cert_chain = read_pem_certs(&tls.cert)?;
+    let key = read_pem_key(&tls.key)?;
+    let server_config = Arc::new(
+        shade_mesh::server_config(ca_bundle.clone(), cert_chain.clone(), clone_key(&tls.key)?)
+            .map_err(|e| anyhow!("server TLS config: {e}"))?,
+    );
+    let client_config = Arc::new(
+        shade_mesh::client_config(ca_bundle, cert_chain, key)
+            .map_err(|e| anyhow!("client TLS config: {e}"))?,
+    );
+
+    let peers = cfg
+        .mesh
+        .peers
+        .iter()
+        .map(|p| MeshPeer {
+            node_id: p.node_id.clone(),
+            endpoint: p.endpoint,
+        })
+        .collect();
+
+    let hub = MeshHub::spawn(
+        store.clone(),
+        MeshHubConfig {
+            node_id: cfg.node.id.clone(),
+            listen_addr: cfg.mesh.listen,
+            server_config,
+            client_config,
+            peers,
+            channels: cfg.network.channels.clone(),
+        },
+    )
+    .await
+    .with_context(|| format!("starting mesh listener on {}", cfg.mesh.listen))?;
+
+    // Share peers_up with /readyz.
+    let probe = readiness.peers_up_handle();
+    let live = hub.peers_up_handle();
+    tokio::spawn(async move {
+        loop {
+            probe.store(
+                live.load(std::sync::atomic::Ordering::Relaxed),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    });
+
+    Ok(Some(Arc::new(hub)))
+}
+
+fn pem_files_present(tls: &TlsConfig) -> bool {
+    tls.ca_bundle.exists() && tls.cert.exists() && tls.key.exists()
+}
+
+fn read_pem_certs(path: &Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let pem =
+        fs::read_to_string(path).with_context(|| format!("reading PEM at {}", path.display()))?;
+    let mut out = Vec::new();
+    for block in pem::parse_many(pem.as_bytes())
+        .with_context(|| format!("parsing PEM at {}", path.display()))?
+    {
+        if block.tag().eq_ignore_ascii_case("CERTIFICATE") {
+            out.push(rustls::pki_types::CertificateDer::from(
+                block.contents().to_vec(),
+            ));
+        }
+    }
+    if out.is_empty() {
+        return Err(anyhow!(
+            "no CERTIFICATE blocks in PEM at {}",
+            path.display()
+        ));
+    }
+    Ok(out)
+}
+
+fn read_pem_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    let pem = fs::read_to_string(path)
+        .with_context(|| format!("reading key PEM at {}", path.display()))?;
+    for block in pem::parse_many(pem.as_bytes())
+        .with_context(|| format!("parsing key PEM at {}", path.display()))?
+    {
+        let tag = block.tag();
+        if tag.eq_ignore_ascii_case("PRIVATE KEY") || tag.eq_ignore_ascii_case("PKCS8 PRIVATE KEY")
+        {
+            return Ok(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                block.contents().to_vec(),
+            )));
+        }
+    }
+    Err(anyhow!(
+        "no PKCS#8 PRIVATE KEY block in PEM at {}",
+        path.display()
+    ))
+}
+
+fn clone_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    read_pem_key(path)
 }
 
 #[tracing::instrument(skip(router))]
