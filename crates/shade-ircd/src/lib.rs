@@ -14,6 +14,7 @@ pub mod message;
 pub mod parser;
 pub mod rate_limit;
 pub mod sasl;
+pub mod state;
 
 pub use caps::{CapAction, CapNegotiation};
 pub use connection::{
@@ -23,3 +24,4 @@ pub use connection::{
 pub use message::{Command, Message, ParseError, Tags};
 pub use parser::{parse, parse_str};
 pub use sasl::{authenticate_start, sasl_authenticate_lines, SaslMechanism};
+pub use state::{ChannelState, Member, PrefixMap, ServerState, StateEvent};
