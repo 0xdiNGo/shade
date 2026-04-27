@@ -1,0 +1,65 @@
+---
+- name: Ensure host directories exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+    owner: "65532"
+    group: "65532"
+  loop:
+    - { path: "{{ shade_config_dir }}", mode: "0755" }
+    - { path: "{{ shade_pki_dir }}", mode: "0750" }
+    - { path: "{{ shade_data_dir }}", mode: "0750" }
+  become: true
+  tags: [shade, dirs]
+
+- name: Render shade.toml
+  ansible.builtin.template:
+    src: shade.toml.j2
+    dest: "{{ shade_config_dir }}/shade.toml"
+    mode: "0644"
+    owner: "65532"
+    group: "65532"
+  become: true
+  notify: Restart shade
+  tags: [shade, config]
+
+- name: Render secrets.env (vault-sourced)
+  ansible.builtin.template:
+    src: secrets.env.j2
+    dest: "{{ shade_config_dir }}/secrets.env"
+    mode: "0600"
+    owner: root
+    group: root
+  become: true
+  no_log: true
+  notify: Restart shade
+  tags: [shade, secrets]
+
+- name: Pull the Shade image
+  ansible.builtin.command:
+    argv:
+      - "{{ shade_runtime }}"
+      - pull
+      - "{{ shade_image }}:{{ shade_image_tag }}"
+  changed_when: false
+  become: true
+  tags: [shade, image]
+
+- name: Install systemd unit
+  ansible.builtin.template:
+    src: shade.service.j2
+    dest: "/etc/systemd/system/{{ shade_service_name }}.service"
+    mode: "0644"
+  become: true
+  notify: Reload systemd
+  tags: [shade, systemd]
+
+- name: Enable + start the Shade service
+  ansible.builtin.systemd:
+    name: "{{ shade_service_name }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+  tags: [shade, systemd]

@@ -1,0 +1,36 @@
+## Managed by Ansible — do not edit by hand.
+## Source: roles/shade/templates/shade.service.j2
+
+[Unit]
+Description=Shade IRC bot ({{ shade_node_id }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+EnvironmentFile=/etc/shade/secrets.env
+ExecStartPre=-/usr/bin/{{ shade_runtime }} rm -f {{ shade_service_name }}
+ExecStart=/usr/bin/{{ shade_runtime }} run \
+  --name {{ shade_service_name }} \
+  --rm \
+  --network host \
+  --read-only \
+  --security-opt=no-new-privileges \
+  --cap-drop=ALL \
+  --user 65532:65532 \
+  --env {{ shade_mesh_psk_env }} \
+{% if shade_network_sasl is defined and shade_network_sasl.mechanism == 'plain' %}
+  --env {{ shade_network_sasl.password_env }} \
+{% endif %}
+  --volume {{ shade_data_dir }}:/var/lib/shade:Z \
+  --volume {{ shade_config_dir }}:/etc/shade:Z,ro \
+  {{ shade_image }}:{{ shade_image_tag }} \
+  run --config /etc/shade/shade.toml
+ExecStop=/usr/bin/{{ shade_runtime }} stop -t 30 {{ shade_service_name }}
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

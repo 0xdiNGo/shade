@@ -1,0 +1,45 @@
+## Managed by Ansible — do not edit by hand.
+## Source: roles/shade/templates/shade.toml.j2
+## Render time: {{ ansible_date_time.iso8601 }}
+
+[node]
+id        = "{{ shade_node_id }}"
+data_dir  = "{{ shade_data_dir }}"
+
+[node.tls]
+ca_bundle = "{{ shade_pki_dir }}/botnet-ca.pem"
+cert      = "{{ shade_pki_dir }}/node.pem"
+key       = "{{ shade_pki_dir }}/node.key"
+
+[mesh]
+listen  = "{{ shade_mesh_listen }}"
+psk_env = "{{ shade_mesh_psk_env }}"
+peers   = [
+{% for p in shade_mesh_peers %}
+  { node_id = "{{ p.node_id }}", endpoint = "{{ p.endpoint }}" }{% if not loop.last %},{% endif %}
+{% endfor %}
+]
+
+[network]
+name     = "{{ shade_network_name }}"
+servers  = {{ shade_network_servers | to_json }}
+nick     = "{{ shade_network_nick }}"
+ident    = "{{ shade_network_ident }}"
+realname = "{{ shade_network_realname }}"
+tls      = {{ shade_network_tls | lower }}
+caps     = {{ shade_network_caps | to_json }}
+channels = {{ shade_network_channels | to_json }}
+{% if shade_network_sasl is defined %}
+sasl     = {{ shade_network_sasl | to_json }}
+{% endif %}
+
+[admin]
+listen    = "{{ shade_admin_listen }}"
+client_ca = "{{ shade_pki_dir }}/botnet-ca.pem"
+
+[metrics]
+listen = "{{ shade_metrics_listen }}"
+
+[logging]
+level  = "{{ shade_log_level }}"
+format = "{{ shade_log_format }}"

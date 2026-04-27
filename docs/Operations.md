@@ -111,10 +111,110 @@ Restart `shade run`. The daemon will detect the PEM trio and bring the mesh onli
 
 For multi-node tests today, copy `botnet-ca.pem` to every node, run `issue-cert` on the side that holds the CA key, and rsync the resulting `node.pem` + `node.key` to the target node.
 
-## Coming in M5–M6
+### Deploying with Ansible (M6)
 
-* **M5** — Role distribution + cookie ops. `ROLE_OP` rotation chooses *which* node sets the mode; HMAC-SHA256 cookies prevent replay between nodes.
-* **M6** — Ansible role at `ansible/roles/shade/` with `container` and `systemd` deploy modes; Vault layout for secrets; podman quadlet files; full operator runbook (rotate mesh PSK, replace a node cert, drain a node, recover from a partition).
+The role at [`ansible/roles/shade`](../ansible/roles/shade) deploys Shade as a Podman-managed container under a `Type=notify` systemd unit on each node.
+
+```sh
+cd ansible
+
+# 1. Generate the botnet CA on the bootstrap node.
+ansible-playbook -i hosts.ini playbooks/bootstrap-ca.yml \
+  --extra-vars "ca_node=shade-iad-01"
+
+# 2. Issue per-node certs (signed by the CA from step 1).
+ansible-playbook -i hosts.ini playbooks/issue-certs.yml
+
+# 3. Deploy. Re-runnable on every config change or image bump.
+ansible-playbook -i hosts.ini playbooks/deploy.yml \
+  --extra-vars "shade_image_tag=v0.1.0"
+```
+
+The full variable reference is in [`ansible/README.md`](../ansible/README.md). Mesh PSK and SASL passwords come from Ansible Vault and are written into a `0600` `secrets.env` consumed via systemd `EnvironmentFile=` — never into the rendered config or unit file.
+
+### Operator runbooks
+
+#### Cert rotation
+
+When a node's cert is approaching expiry (or has been compromised):
+
+```sh
+# 1. On the bootstrap CA node, issue a fresh cert.
+shade issue-cert --node-id shade-iad-01 --ca-dir /etc/shade/pki --out-dir /tmp/new-cert
+
+# 2. Copy node.pem + node.key to the target.
+scp /tmp/new-cert/node.{pem,key} target:/etc/shade/pki/
+
+# 3. Bounce the daemon.
+ssh target systemctl restart shade
+```
+
+CA rotation is a heavier procedure: re-bootstrap the CA on a new node, reissue every node cert, copy the new CA bundle to every node, restart in a rolling fashion.
+
+#### Mesh PSK rotation
+
+```sh
+# 1. Generate a new PSK locally (32+ bytes of /dev/urandom).
+NEW_PSK=$(head -c 48 /dev/urandom | base64)
+
+# 2. Update Ansible Vault.
+ansible-vault edit ansible/group_vars/all/vault.yml
+# Set vault_shade_mesh_psk: "<NEW_PSK>"
+
+# 3. Rolling redeploy.
+ansible-playbook -i hosts.ini playbooks/deploy.yml --serial 1
+```
+
+There's a brief window during the rolling rotation where some nodes have the old PSK and some have the new — cookies minted on one side fail verification on the other. Plan for ≤ 60 seconds of degraded cookie verification per node bounce; the mesh stays connected throughout (mTLS is independent of the PSK).
+
+#### Drain a node before maintenance
+
+```sh
+# 1. Stop the daemon — peers detect the disconnect within ~1s and
+#    rebalance roles among the remaining set.
+systemctl stop shade
+
+# 2. Do the maintenance work (kernel upgrade, hardware swap, ...).
+
+# 3. Bring the daemon back up.
+systemctl start shade
+# /readyz will flip irc_connected:true once IRC reconnects, and
+# peers_up:true once at least one mesh peer accepts the dialer.
+```
+
+The peer's snapshot exchange catches up the returning node before any new gossip is applied — same code path as a fresh boot.
+
+#### Recover from a partition
+
+Two halves of a partition operate independently; both think they hold all roles, so both may issue ops in their respective views. Cookie verification keeps each side's ops self-consistent. On heal:
+
+1. The mesh handshake completes between previously-disconnected peers.
+2. Each side sends `SnapshotRequest{since_ts: last_seen_for_peer}`.
+3. Both sides exchange any rows newer than the watermark.
+4. Last-write-wins resolves conflicts; mask tombstones are honored.
+5. The next role-rebalance tick (≤ 5 minutes) restores the unified `ROLE_OP` assignment.
+
+**No manual intervention required for a healthy heal.** If the audit log shows mass-op warnings during the partition, that's expected — operators inspect the audit log to verify legitimacy.
+
+### CI smoke
+
+Every PR runs `deploy/smoke.sh` end-to-end on GitHub Actions. The script boots ergo + shade via docker compose, asserts `/readyz` flips `irc_connected:true`, exercises the full `/v1` surface (users / channels / masks / audit), and tears down. Failure dumps the shade container's logs as a CI artifact.
+
+To run the same smoke locally:
+
+```sh
+cd deploy && ./smoke.sh
+```
+
+## Threat model
+
+See [Threat-Model.md](Threat-Model.md). The high-stakes axes:
+
+* Compromised IRC server (services we trust for nick identity but not for op authority).
+* Compromised single Shade node (mesh PSK rotation, cookie-key generation counter).
+* Compromised peer cert (cert pinning + fingerprint in `peers` table; CA rotation runbook above).
+* Compromised mesh PSK (rotation runbook above).
+* Network partition (deterministic role rotation tolerates it; see § Recover from a partition).
 
 ## Observability shape
 
@@ -123,14 +223,3 @@ For multi-node tests today, copy `botnet-ca.pem` to every node, run `issue-cert`
 * **Health**: `/healthz` (always ok once the process binds), `/readyz` (composite — `irc_connected`, `peers_up`, `store_open`).
 * **Audit**: per-mutation rows in the `audit_log` SQLite table. Audit rows are **not** mesh-replicated (M4); each node owns its own history.
 
-## Threat model (placeholder)
-
-A full written threat model lands before M5. The high-stakes axes:
-
-* Compromised IRC server (we trust services for nick identity but not for op authority).
-* Compromised single Shade node (mesh PSK rotation, cookie-key generation counter).
-* Compromised peer cert (cert pinning + fingerprint in `peers` table).
-* Compromised mesh PSK (full rebuild required; documented).
-* Network partition (deterministic role rotation tolerates this; see [Architecture § Role distribution](Architecture.md#role-distribution)).
-
-References to come once the document exists in-tree.

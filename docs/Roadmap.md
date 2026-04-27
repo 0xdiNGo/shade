@@ -9,7 +9,7 @@ Six milestones from scaffold to MVP demo. Each one closes with a runnable artifa
 | **M3** | Domain + HTTP API: users, channels, flags, masks. `shadectl` CLI. Audit log. Single-node only. | ✅ **DONE** | Create users via API, bot auto-ops `+o` users on join, kicks banned hosts |
 | **M4** | Mesh: mTLS listener, handshake, snapshot sync, delta gossip for users/channels/masks. | ✅ **DONE** | 2 nodes, write to A, read from B, identical state in <100ms |
 | **M5** | Role distribution + cookie ops: `OpRequest`/`OpGrant` mesh messages, HMAC-SHA256 cookies, mass-op/deop detection. | ✅ **DONE** | 2 nodes, one with ROLE_OP, the other requests op via mesh, cookie-verified op happens; tampered cookie rejected |
-| **M6** | MVP polish + Ansible role + container deployment: floods (subset), join-flood lockdown, autoop on join, chanset toggles, in-channel `/MSG TOKEN` admin commands. Integration tests against `ergo` in CI. | ⏳ **NEXT** | Full smallest-slice scenario deployed by `ansible-playbook` against 3 VMs running containers |
+| **M6** | MVP polish + Ansible role + container deployment: ergo end-to-end smoke in CI, deployable role, operator runbook + threat model. The remaining chanset toggles, in-channel `/MSG TOKEN` flow, and Argon2id login flow are tracked as v0.2 items. | ✅ **DONE** | `ansible-playbook deploy.yml` rolls out a multi-node mesh against 3 VMs running container artifacts |
 
 ## What "MVP" means
 
@@ -26,11 +26,14 @@ Two Shade nodes, mesh-linked over mTLS, both joined to `#shade-test` on a real I
 
 * Multi-network IRC (single network for v0)
 * `RBL` / DNSBL on join
-* Revenge actions (the rest of `deflag_t` mass-action handlers beyond mass-op/deop)
+* Revenge actions (the rest of `deflag_t` mass-action handlers beyond mass-op/deop detection)
 * Cache-invite for closed channels
 * The remaining chanset toggles (we ship 12 of ~25 in MVP)
 * The remaining flood thresholds (we ship 4 of 12 in MVP)
 * The remaining role types (we ship 6 of 13; RESOLV dropped entirely)
+* In-channel `/MSG TOKEN op #foo nick` admin flow (token endpoint scaffolded; PRIVMSG router lands in v0.2)
+* Argon2id-backed `POST /v1/login` issuing short-lived bearer tokens — admin currently trusts the front-of-listener mTLS to assert the operator identity
+* Native mTLS verification on the admin listener (front it with a TLS-terminating proxy or wait for v0.2)
 
 ## Out forever (intentionally)
 
