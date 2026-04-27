@@ -73,7 +73,10 @@ pub fn upsert_in_tx(
             global_flags  = excluded.global_flags,
             comment       = excluded.comment,
             updated_at    = excluded.updated_at,
-            origin_node   = excluded.origin_node",
+            origin_node   = excluded.origin_node
+         WHERE users.updated_at < excluded.updated_at
+            OR (users.updated_at = excluded.updated_at
+                AND users.origin_node > excluded.origin_node)",
         params![
             id.as_bytes().to_vec(),
             &new_user.handle,
@@ -124,6 +127,29 @@ pub fn get_by_id(store: &Store, id: UserId) -> Result<Option<User>, StoreError> 
 pub fn get_by_handle(store: &Store, handle: &str) -> Result<Option<User>, StoreError> {
     let conn = store.conn()?;
     fetch_one(&conn, "handle = ?1", params![handle])
+}
+
+/// List users with `updated_at > since_ts`, oldest-first. The mesh
+/// snapshot stream uses this to page rows newer than the requester's
+/// watermark.
+pub fn list_since(store: &Store, since_ts: i64) -> Result<Vec<User>, StoreError> {
+    let conn = store.conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, handle, password_hash, is_bot, global_flags, comment,
+                created_at, updated_at, last_seen_at, origin_node
+         FROM users
+         WHERE updated_at > ?1
+         ORDER BY updated_at",
+    )?;
+    let rows: Vec<User> = stmt
+        .query_map(params![since_ts], |row| Ok(map_user_row(row)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut filled = Vec::with_capacity(rows.len());
+    for mut user in rows {
+        user.hosts = fetch_hosts(&conn, user.id)?;
+        filled.push(user);
+    }
+    Ok(filled)
 }
 
 /// List all users, ordered by handle.

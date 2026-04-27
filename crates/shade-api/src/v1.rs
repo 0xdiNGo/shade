@@ -573,7 +573,7 @@ async fn delete_mask(
         .map_err(|e| ApiError::BadRequest(format!("invalid mask id: {e}")))?;
     let mask_id = shade_core::MaskId(parsed);
     let mask = shade_store::masks::get_by_id(&state.store, mask_id)?.ok_or(ApiError::NotFound)?;
-    let deleted = shade_store::masks::delete(&state.store, mask_id)?;
+    let deleted = shade_store::masks::delete(&state.store, mask_id, &state.node_id)?;
     if !deleted {
         return Err(ApiError::NotFound);
     }

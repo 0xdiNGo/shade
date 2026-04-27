@@ -42,7 +42,10 @@ pub fn upsert(
          ON CONFLICT(id) DO UPDATE SET
             name        = excluded.name,
             updated_at  = excluded.updated_at,
-            origin_node = excluded.origin_node",
+            origin_node = excluded.origin_node
+         WHERE channels.updated_at < excluded.updated_at
+            OR (channels.updated_at = excluded.updated_at
+                AND channels.origin_node > excluded.origin_node)",
         params![
             id.as_bytes().to_vec(),
             &new_channel.name,
@@ -72,6 +75,60 @@ pub fn get_by_id(store: &Store, id: ChannelId) -> Result<Option<Channel>, StoreE
 pub fn get_by_name(store: &Store, name: &str) -> Result<Option<Channel>, StoreError> {
     let conn = store.conn()?;
     fetch_channel(&conn, "name = ?1", params![name])
+}
+
+/// List channels with `updated_at > since_ts`, oldest-first. Used by
+/// snapshot streaming.
+pub fn list_since(store: &Store, since_ts: i64) -> Result<Vec<Channel>, StoreError> {
+    let conn = store.conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, created_at, updated_at, origin_node
+         FROM channels
+         WHERE updated_at > ?1
+         ORDER BY updated_at",
+    )?;
+    let rows = stmt
+        .query_map(params![since_ts], |row| Ok(map_channel_row(row)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// List channel_settings rows with `updated_at > since_ts`, oldest-first.
+pub fn list_settings_since(
+    store: &Store,
+    since_ts: i64,
+) -> Result<Vec<ChannelSettings>, StoreError> {
+    let conn = store.conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT channel_id, flags, mode_pls, mode_mns, limit_prot,
+                key_prot, topic_saved, updated_at, origin_node
+         FROM channel_settings
+         WHERE updated_at > ?1
+         ORDER BY updated_at",
+    )?;
+    let rows = stmt
+        .query_map(params![since_ts], |row| Ok(map_settings_row(row)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// List channel_user_flags rows with `updated_at > since_ts`,
+/// oldest-first.
+pub fn list_user_flags_since(
+    store: &Store,
+    since_ts: i64,
+) -> Result<Vec<ChannelUserFlags>, StoreError> {
+    let conn = store.conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT channel_id, user_id, flags, updated_at, origin_node
+         FROM channel_user_flags
+         WHERE updated_at > ?1
+         ORDER BY updated_at",
+    )?;
+    let rows = stmt
+        .query_map(params![since_ts], |row| Ok(map_user_flags_row(row)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 /// List channels, ordered by name.
@@ -151,7 +208,10 @@ pub fn upsert_settings(
             key_prot    = excluded.key_prot,
             topic_saved = excluded.topic_saved,
             updated_at  = excluded.updated_at,
-            origin_node = excluded.origin_node",
+            origin_node = excluded.origin_node
+         WHERE channel_settings.updated_at < excluded.updated_at
+            OR (channel_settings.updated_at = excluded.updated_at
+                AND channel_settings.origin_node > excluded.origin_node)",
         params![
             settings.channel_id.as_bytes().to_vec(),
             i64::from_le_bytes(settings.flags.bits().to_le_bytes()),
@@ -227,7 +287,10 @@ pub fn upsert_user_flags(
          ON CONFLICT(channel_id, user_id) DO UPDATE SET
             flags       = excluded.flags,
             updated_at  = excluded.updated_at,
-            origin_node = excluded.origin_node",
+            origin_node = excluded.origin_node
+         WHERE channel_user_flags.updated_at < excluded.updated_at
+            OR (channel_user_flags.updated_at = excluded.updated_at
+                AND channel_user_flags.origin_node > excluded.origin_node)",
         params![
             channel_id.as_bytes().to_vec(),
             user_id.as_bytes().to_vec(),
