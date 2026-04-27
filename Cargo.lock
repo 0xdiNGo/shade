@@ -1760,6 +1760,13 @@ dependencies = [
 [[package]]
 name = "shade-mesh"
 version = "0.0.0"
+dependencies = [
+ "rmp-serde",
+ "shade-proto",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "shade-proto"

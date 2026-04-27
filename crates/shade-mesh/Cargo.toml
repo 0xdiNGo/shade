@@ -13,3 +13,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+rmp-serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+shade-proto = { path = "../shade-proto" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
