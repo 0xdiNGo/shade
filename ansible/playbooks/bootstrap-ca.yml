@@ -1,0 +1,43 @@
+---
+# One-time bootstrap. Generates the botnet CA on the designated node
+# (`--extra-vars ca_node=shade-iad-01`), then fetches the CA bundle
+# back to the Ansible control host so subsequent runs can issue node
+# certs against it.
+#
+# The CA private key NEVER leaves the bootstrap node. To rotate the CA
+# you re-run this playbook against a new bootstrap node and reissue
+# certs to every other node.
+
+- name: Generate botnet CA
+  hosts: "{{ ca_node }}"
+  gather_facts: false
+  tasks:
+    - name: Ensure PKI directory exists
+      ansible.builtin.file:
+        path: "{{ shade_pki_dir }}"
+        state: directory
+        mode: "0750"
+      become: true
+
+    - name: shade init-ca
+      ansible.builtin.command:
+        argv:
+          - "{{ shade_runtime | default('podman') }}"
+          - run
+          - --rm
+          - --volume
+          - "{{ shade_pki_dir }}:/out:Z"
+          - "{{ shade_image | default('ghcr.io/0xdiNGo/shade') }}:{{ shade_image_tag | default('main') }}"
+          - init-ca
+          - --out-dir
+          - /out
+      args:
+        creates: "{{ shade_pki_dir }}/botnet-ca.pem"
+      become: true
+
+    - name: Fetch the CA bundle to the control host
+      ansible.builtin.fetch:
+        src: "{{ shade_pki_dir }}/botnet-ca.pem"
+        dest: "./pki/botnet-ca.pem"
+        flat: true
+      become: true

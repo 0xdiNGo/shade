@@ -1,0 +1,42 @@
+---
+# Identity
+shade_node_id: "{{ inventory_hostname }}"
+
+# Container artifact
+shade_image: "ghcr.io/0xdiNGo/shade"
+shade_image_tag: "main"
+
+# Host paths (created by the role; bind-mounted into the container)
+shade_data_dir: /var/lib/shade
+shade_pki_dir: /etc/shade/pki
+shade_config_dir: /etc/shade
+
+# Listeners
+shade_admin_listen: "0.0.0.0:8443"
+shade_metrics_listen: "127.0.0.1:9090"
+shade_mesh_listen: "0.0.0.0:7331"
+
+# Mesh peers — each entry is { node_id, endpoint }
+shade_mesh_peers: []
+shade_mesh_psk_env: "SHADE_MESH_PSK"
+
+# IRC
+shade_network_name: "libera"
+shade_network_servers: ["irc.libera.chat:6697"]
+shade_network_nick: "shade"
+shade_network_ident: "shade"
+shade_network_realname: "Shade IRC Bot"
+shade_network_tls: true
+shade_network_channels: []
+shade_network_caps: ["sasl", "server-time", "multi-prefix"]
+# shade_network_sasl: { mechanism: "external" }    # or { mechanism: "plain", username: "...", password_env: "SHADE_SASL_PASSWORD" }
+
+# Logging
+shade_log_level: "info"
+shade_log_format: "json"
+
+# systemd unit name
+shade_service_name: "shade"
+
+# OCI runtime: podman (default) or docker
+shade_runtime: podman
