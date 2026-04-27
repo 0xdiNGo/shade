@@ -112,6 +112,37 @@ PSK rotates on a quorum-advanced generation counter, with wall-clock fallback af
 
 Why this is materially better than Wraith's MD5+counter scheme is in [Improvements Over Wraith § Cookie ops](Improvements-Over-Wraith.md#4-md5-cookie--per-bot-counter-for-op-replay-prevention).
 
+## Admin API
+
+`shade-api::v1` exposes the M3 CRUD surface. Mounted alongside `/healthz`, `/readyz`, `/metrics` on the same admin listener.
+
+| Path | Methods |
+|---|---|
+| `/v1/users` | GET, POST |
+| `/v1/users/:handle` | GET, PATCH, DELETE |
+| `/v1/channels` | GET, POST |
+| `/v1/channels/:name` | GET, DELETE |
+| `/v1/channels/:name/settings` | GET, PUT |
+| `/v1/channels/:name/users/:handle` | PUT, DELETE |
+| `/v1/channels/:name/masks?kind=…` | GET, POST |
+| `/v1/masks/:id` | DELETE |
+| `/v1/audit?limit=N&actor=substr` | GET |
+
+`PATCH` and `PUT` flag endpoints accept either an absolute set (`flags` / `global_flags`) or a Wraith-style `flags_diff` (`+ox-d`) applied to the existing row.
+
+Every mutation writes one `AuditEntry` (`AuditSource::Api`) before returning. Audit writes are best-effort: a failure to insert is logged but does not roll back the mutation. The actor for the audit row is taken from the `X-Actor` request header, defaulting to the node ID. Production deployments must front the listener with mTLS — the API does not authenticate by itself.
+
+`shadectl` is the operator CLI (`shade users …`, `shade channels …`, `shade chattr …`, `shade mask …`, `shade audit`). Synchronous `ureq`; one HTTP call per subcommand. Output is the API's raw JSON (or `--pretty` indented).
+
+### On-JOIN policy
+
+The daemon's `drive_session` loop runs two policy checks for every peer JOIN:
+
+1. **Ban check.** `shade_store::masks::match_ban` is consulted with the channel and the peer's `nick!user@host`. Channel-scoped exempts beat channel-scoped bans, which beat global bans. A match → `KICK <chan> <nick> :<reason>`.
+2. **Identification + auto-op.** `shade_store::users::match_by_host` looks up the peer by hostmask. If a `ChannelUserFlags` row exists carrying `+o`, the daemon sends `MODE <chan> +o <nick>`. Hostmask matching is *passive identification only* — the per-channel flag set is what grants the privilege.
+
+Mass-action defenses (op floods, mode storms) and the `ROLE_OP` rotation that decides *which* bot actually sets the mode arrive in M5; M3's auto-op fires unconditionally on every node that thinks it should op, which is the right behavior for single-node dev but will be guarded once the mesh is in.
+
 ## Authentication
 
 Two paths:

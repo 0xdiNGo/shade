@@ -112,8 +112,16 @@ pub enum SessionEvent {
         target: String,
         body: String,
     },
-    /// We joined a channel (us, not someone else).
-    SelfJoined { channel: String },
+    /// Someone joined a channel — including us, distinguished by
+    /// `is_self`. The fields mirror `Member` so consumers can run policy
+    /// (auto-op, auto-kick) without re-querying state.
+    Joined {
+        channel: String,
+        nick: String,
+        user: Option<String>,
+        host: Option<String>,
+        is_self: bool,
+    },
     /// SASL succeeded (`903 RPL_SASLSUCCESS`) or was skipped because
     /// either the cap wasn't acked or no mechanism was configured.
     SaslOutcome { succeeded: bool },
@@ -399,11 +407,20 @@ impl<'a> Runner<'a> {
                 }
             }
             StateEvent::Joined {
-                channel, is_self, ..
+                channel,
+                member,
+                is_self,
             } => {
-                if is_self {
-                    let _ = self.events.send(SessionEvent::SelfJoined { channel }).await;
-                }
+                let _ = self
+                    .events
+                    .send(SessionEvent::Joined {
+                        channel,
+                        nick: member.nick,
+                        user: member.user,
+                        host: member.host,
+                        is_self,
+                    })
+                    .await;
             }
             StateEvent::Ping { token } => {
                 self.send(format!("PONG :{token}")).await;
@@ -566,7 +583,9 @@ mod tests {
                     assert_eq!(nick, "shade");
                     got_welcome = true;
                 }
-                SessionEvent::SelfJoined { channel } => {
+                SessionEvent::Joined {
+                    channel, is_self, ..
+                } if is_self => {
                     assert_eq!(channel, "#shade-test");
                     got_join = true;
                     break;
@@ -576,7 +595,7 @@ mod tests {
         }
 
         assert!(got_welcome, "never received Welcomed event");
-        assert!(got_join, "never received SelfJoined event");
+        assert!(got_join, "never received self-Joined event");
         assert!(
             ready.is_ready(),
             "ReadyHandle should be set after RPL_WELCOME"

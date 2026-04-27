@@ -168,6 +168,53 @@ pub fn touch_last_seen(store: &Store, id: UserId) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Match a `nick!user@host` string against every user's stored hostmasks
+/// and return the first matching user. Used for passive identification
+/// during JOIN policy. Returns `None` if no user has a matching hostmask.
+///
+/// **Identification only** — does *not* grant any permission by itself
+/// (per Architecture.md § Authentication, hostmask matching never grants
+/// permission; the per-channel flag set decides what the user can do).
+pub fn match_by_host(store: &Store, host: &str) -> Result<Option<User>, StoreError> {
+    let conn = store.conn()?;
+    let mut user_stmt = conn.prepare(
+        "SELECT u.id, u.handle, u.password_hash, u.is_bot, u.global_flags, u.comment,
+                u.created_at, u.updated_at, u.last_seen_at, u.origin_node, h.hostmask
+         FROM users u
+         JOIN user_hosts h ON h.user_id = u.id",
+    )?;
+    let mut rows = user_stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let mask: String = row.get(10)?;
+        if crate::masks::irc_glob_match(&mask, host) {
+            let id_bytes: Vec<u8> = row.get(0)?;
+            let mut id_arr = [0u8; 16];
+            id_arr.copy_from_slice(&id_bytes[..16]);
+            let flags_i64: i64 = row.get(4)?;
+            let user = User {
+                id: UserId::from_bytes(id_arr),
+                handle: row.get(1)?,
+                password_hash: row.get(2)?,
+                is_bot: row.get::<_, i64>(3)? != 0,
+                global_flags: FlagSet::from_bits(u64::from_le_bytes(flags_i64.to_le_bytes())),
+                comment: row.get(5)?,
+                hosts: Vec::new(),
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+                last_seen_at: row.get(8)?,
+                origin_node: row.get(9)?,
+            };
+            // Refill the host list now that we know which user we want.
+            drop(rows);
+            drop(user_stmt);
+            let mut full = user;
+            full.hosts = fetch_hosts(&conn, full.id)?;
+            return Ok(Some(full));
+        }
+    }
+    Ok(None)
+}
+
 fn fetch_one(
     conn: &rusqlite::Connection,
     where_clause: &str,
@@ -365,6 +412,48 @@ mod tests {
         let after = get_by_id(&store, user.id).unwrap().unwrap();
         assert_eq!(after.updated_at, before, "updated_at must not change");
         assert!(after.last_seen_at.is_some(), "last_seen_at should be set");
+    }
+
+    #[test]
+    fn match_by_host_returns_user_with_matching_hostmask() {
+        let store = fresh_store();
+        let alice = upsert(
+            &store,
+            &NewUser {
+                handle: "alice".into(),
+                password_hash: None,
+                is_bot: false,
+                global_flags: FlagSet::NONE,
+                comment: None,
+                hosts: vec!["*!*@trusted.example".into(), "alice!*@*".into()],
+            },
+            "node-a",
+        )
+        .unwrap();
+        let _bob = upsert(
+            &store,
+            &NewUser {
+                handle: "bob".into(),
+                password_hash: None,
+                is_bot: false,
+                global_flags: FlagSet::NONE,
+                comment: None,
+                hosts: vec!["bob!*@*".into()],
+            },
+            "node-a",
+        )
+        .unwrap();
+
+        let matched = match_by_host(&store, "alice!ident@trusted.example")
+            .unwrap()
+            .unwrap();
+        assert_eq!(matched.id, alice.id);
+        assert_eq!(matched.hosts.len(), 2, "host list rehydrates on match");
+
+        // No user matches an entirely different host.
+        assert!(match_by_host(&store, "stranger!u@other.example")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

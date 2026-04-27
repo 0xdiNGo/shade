@@ -56,12 +56,8 @@ Update the relevant page in the same PR that introduces the architectural change
 
 **M2 ✅** — IRC client. Parser + fuzz harness, TLS connection runner with token-bucket rate limiter and exponential backoff, IRCv3 cap negotiation, SASL PLAIN/EXTERNAL, channel state machine, outbound MODE batcher, and the `shade-ircd::session` async loop tying it all together. `docker compose up --build` runs ergo + shade end-to-end; `/readyz`'s `irc_connected` flips on RPL_WELCOME; `!ping → pong` works.
 
-**M3 (in progress)** — Domain + HTTP API + shadectl + auto-op/auto-kick. Planned PR sequence:
+**M3 ✅** — Domain + HTTP API + shadectl + auto-op/auto-kick. `shade-core` domain types (FlagSet/User/Channel/Mask/Role/AuditEntry). `shade-store` CRUD accessors with `match_by_host` for passive identification. `shade-api::v1` admin routes for users / channels / masks / audit, mTLS-pending. `shadectl` CLI talking to the admin API via ureq. Daemon's `apply_join_policy` kicks peers matching channel ban masks and auto-ops users with `+o` in their per-channel flag set.
 
-1. `shade-core` domain types (`FlagSet`, `User`, `Channel`, `ChannelSettings`, `ChannelUserFlags`, `Mask`, `Role`, `AuditEntry`).
-2. `shade-store` accessors (CRUD over the V0001 tables, returning shade-core types).
-3. `shade-api` REST routes for users / channels / masks, with audit-log writes.
-4. `shadectl` CLI subcommands talking to the admin API.
-5. Behavior wire-up: auto-op `+o` users on JOIN, kick `+k`/banned hosts on JOIN.
+**M4 (next)** — see `docs/Roadmap.md`. mesh: mTLS listener, handshake, snapshot sync, delta gossip for users/channels/masks.
 
-**M4–M6** — see `docs/Roadmap.md`.
+**M5–M6** — see `docs/Roadmap.md`.
