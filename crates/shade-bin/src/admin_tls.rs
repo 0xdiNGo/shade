@@ -28,9 +28,11 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use shade_api::auth::VerifiedActor;
 use tokio::net::TcpListener;
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
 use crate::config::AdminConfig;
+use crate::shutdown::ShutdownSignal;
 
 /// Build the rustls `ServerConfig` for the admin listener.
 ///
@@ -46,36 +48,70 @@ pub fn build_server_config(
     Ok(Arc::new(cfg))
 }
 
-/// Accept loop for the TLS-enabled admin listener. Returns when the
-/// listener fails to bind or `accept()` errors fatally; per-connection
-/// errors are logged and the loop continues.
+/// Accept loop for the TLS-enabled admin listener.
+///
+/// Returns when the listener fails to bind, when `accept()` errors
+/// fatally, or when `shutdown` fires. On shutdown the accept loop
+/// stops accepting new connections immediately and then waits for
+/// every spawned per-connection task to finish — same drain semantics
+/// as `axum::serve(...).with_graceful_shutdown(...)` for the plain-TCP
+/// path. Per-connection errors are logged and the loop continues.
 pub async fn serve_admin_tls(
     addr: SocketAddr,
     server_config: Arc<ServerConfig>,
     router: axum::Router,
+    shutdown: ShutdownSignal,
 ) -> Result<()> {
     let acceptor = TlsAcceptor::from(server_config);
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding admin TLS listener on {addr}"))?;
     tracing::info!(%addr, "admin listener bound (mTLS)");
+
+    let mut conns = JoinSet::new();
+    let mut shutdown_fut = std::pin::pin!(shutdown.recv());
+
     loop {
-        let (stream, peer_addr) = match listener.accept().await {
-            Ok(pair) => pair,
-            Err(err) => {
-                tracing::warn!(%err, "admin: accept failed");
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                continue;
+        tokio::select! {
+            biased;
+            // Shutdown: stop accepting; fall through to drain.
+            () = &mut shutdown_fut => {
+                tracing::info!(%addr, "admin: shutdown received, draining connections");
+                break;
             }
-        };
-        let acceptor = acceptor.clone();
-        let router = router.clone();
-        tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, peer_addr, acceptor, router).await {
-                tracing::debug!(%peer_addr, %err, "admin: connection ended with error");
+            // Accept a new connection.
+            accept_result = listener.accept() => {
+                match accept_result {
+                    Ok((stream, peer_addr)) => {
+                        let acceptor = acceptor.clone();
+                        let router = router.clone();
+                        conns.spawn(async move {
+                            if let Err(err) =
+                                handle_connection(stream, peer_addr, acceptor, router).await
+                            {
+                                tracing::debug!(%peer_addr, %err, "admin: connection ended with error");
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "admin: accept failed");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
             }
-        });
+            // Reap finished connection tasks while we wait, so the
+            // JoinSet doesn't grow unbounded under load.
+            Some(_) = conns.join_next() => {}
+        }
     }
+
+    // Drain phase: wait for every in-flight connection. The outer
+    // `run()` already wraps us in a timeout, so we don't need our own
+    // deadline here — if connections hang, the outer abort takes
+    // over.
+    while let Some(_res) = conns.join_next().await {}
+    tracing::info!(%addr, "admin: drained {} connection(s)", 0);
+    Ok(())
 }
 
 async fn handle_connection(

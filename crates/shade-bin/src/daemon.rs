@@ -8,6 +8,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use shade_api::admin::{AdminState, ReadinessProbes};
@@ -19,7 +20,14 @@ use shade_ircd::{
 use shade_mesh::{MeshHub, MeshHubConfig, MeshPeer};
 
 use crate::config::{Config, NetworkConfig, SaslConfig, TlsConfig};
+use crate::shutdown::{Shutdown, ShutdownSignal};
 use crate::telemetry;
+
+/// How long to wait after Ctrl-C / SIGTERM for in-flight work to drain
+/// before falling back to forceful task aborts. Calibrated for the
+/// HTTP admin path (Argon2id login verifies are the slowest single
+/// operation at ~100 ms) plus a generous IRC-side QUIT flush window.
+const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Run the Shade daemon until it receives Ctrl-C or SIGTERM.
 pub async fn run(cfg: Config) -> Result<()> {
@@ -83,12 +91,15 @@ pub async fn run(cfg: Config) -> Result<()> {
         (None, _) => None,
     };
 
+    let shutdown = Shutdown::new();
+
     let session_task = tokio::spawn(drive_session(
         session,
         session_writer.clone(),
         store.clone(),
         Arc::from(cfg.node.id.as_str()),
         role_ctx.clone(),
+        shutdown.signal(),
     ));
 
     let admin_router = shade_api::admin::router(AdminState {
@@ -101,15 +112,38 @@ pub async fn run(cfg: Config) -> Result<()> {
     }));
     let metrics_router = shade_api::metrics::router(metrics_handle);
 
-    let admin = spawn_admin_listener(&cfg, admin_router)?;
-    let metrics = tokio::spawn(serve("metrics", cfg.metrics.listen, metrics_router));
+    let admin = spawn_admin_listener(&cfg, admin_router, shutdown.signal())?;
+    let metrics = tokio::spawn(serve(
+        "metrics",
+        cfg.metrics.listen,
+        metrics_router,
+        shutdown.signal(),
+    ));
 
     wait_for_shutdown().await?;
+    tracing::info!("shutdown signal received, draining in-flight work");
+    shutdown.trigger();
 
-    tracing::info!("shutdown signal received, stopping listeners");
-    admin.abort();
-    metrics.abort();
-    session_task.abort();
+    // Give every task up to SHUTDOWN_DRAIN_TIMEOUT to finish in-flight
+    // work. After the deadline, any survivors are forcefully aborted —
+    // axum's `with_graceful_shutdown` already stops accepting new
+    // connections at trigger time, so the only thing draining is
+    // current requests / a live IRC QUIT exchange.
+    let drain = async {
+        let _ = tokio::join!(admin, metrics, session_task);
+    };
+    if tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, drain)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout_ms = u64::try_from(SHUTDOWN_DRAIN_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+            "drain timeout exceeded; tasks will be aborted on runtime shutdown"
+        );
+    } else {
+        tracing::info!("all listeners drained cleanly");
+    }
+
     if let Some(hub) = mesh {
         if let Ok(hub) = Arc::try_unwrap(hub) {
             hub.shutdown();
@@ -240,15 +274,22 @@ fn clone_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
     read_pem_key(path)
 }
 
-#[tracing::instrument(skip(router))]
-async fn serve(name: &'static str, addr: SocketAddr, router: axum::Router) -> Result<()> {
+#[tracing::instrument(skip(router, shutdown))]
+async fn serve(
+    name: &'static str,
+    addr: SocketAddr,
+    router: axum::Router,
+    shutdown: ShutdownSignal,
+) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {name} listener on {addr}"))?;
     tracing::info!(%addr, "{name} listener bound");
     axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown.recv())
         .await
         .with_context(|| format!("{name} server"))?;
+    tracing::info!(%addr, "{name} listener drained");
     Ok(())
 }
 
@@ -261,6 +302,7 @@ async fn serve(name: &'static str, addr: SocketAddr, router: axum::Router) -> Re
 fn spawn_admin_listener(
     cfg: &Config,
     router: axum::Router,
+    shutdown: ShutdownSignal,
 ) -> Result<tokio::task::JoinHandle<Result<()>>> {
     let admin = &cfg.admin;
     let server_cert_path = admin
@@ -277,7 +319,7 @@ fn spawn_admin_listener(
             addr = %admin.listen,
             "admin: require_mtls=false — serving plain HTTP (development only)"
         );
-        return Ok(tokio::spawn(serve("admin", admin.listen, router)));
+        return Ok(tokio::spawn(serve("admin", admin.listen, router, shutdown)));
     }
 
     if !crate::admin_tls::admin_tls_present(admin, server_cert_path) {
@@ -288,7 +330,7 @@ fn spawn_admin_listener(
             "admin: require_mtls=true but PKI material missing — falling back to plain HTTP. \
              run `shade init-ca` + `shade issue-cert` + `shade issue-admin-cert` to bring mTLS online."
         );
-        return Ok(tokio::spawn(serve("admin", admin.listen, router)));
+        return Ok(tokio::spawn(serve("admin", admin.listen, router, shutdown)));
     }
 
     let client_ca = read_pem_certs(&admin.client_ca)?;
@@ -298,7 +340,7 @@ fn spawn_admin_listener(
 
     let listen = admin.listen;
     Ok(tokio::spawn(async move {
-        crate::admin_tls::serve_admin_tls(listen, server_config, router).await
+        crate::admin_tls::serve_admin_tls(listen, server_config, router, shutdown).await
     }))
 }
 
@@ -398,6 +440,7 @@ async fn drive_session(
     store: Arc<shade_store::Store>,
     node_id: Arc<str>,
     role_ctx: Option<RoleContext>,
+    mut shutdown: ShutdownSignal,
 ) {
     let mut op_observer = crate::op_observer::OpObserver::new();
     let observer_ctx = role_ctx
@@ -406,7 +449,25 @@ async fn drive_session(
             node_id: r.node_id.clone(),
             mesh_psk: r.mesh_psk.clone(),
         });
-    while let Some(evt) = session.next_event().await {
+    loop {
+        let evt = tokio::select! {
+            biased;
+            // Shutdown: send a polite QUIT to the IRC server and exit.
+            // The Writer's send is best-effort — if the server has
+            // already closed, the queue drops the line silently.
+            () = shutdown.recv_ref() => {
+                tracing::info!("irc: shutdown signal — sending QUIT");
+                let _ = writer.send("QUIT :shade shutting down".to_owned()).await;
+                // Brief grace window so the QUIT actually flushes
+                // before the runtime tears down the writer.
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                break;
+            }
+            evt = session.next_event() => match evt {
+                Some(e) => e,
+                None => break,
+            },
+        };
         match evt {
             SessionEvent::Welcomed { nick } => {
                 tracing::info!(%nick, "irc: registered");
