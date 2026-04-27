@@ -87,6 +87,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         session,
         session_writer.clone(),
         store.clone(),
+        Arc::from(cfg.node.id.as_str()),
         role_ctx.clone(),
     ));
 
@@ -390,10 +391,12 @@ fn parse_server_addr(s: &str) -> Result<SocketAddr> {
         .ok_or_else(|| anyhow!("no addresses returned for {s}"))
 }
 
+#[allow(clippy::too_many_lines)] // Event dispatch loop; one match arm per SessionEvent variant.
 async fn drive_session(
     mut session: Session,
     writer: Writer,
     store: Arc<shade_store::Store>,
+    node_id: Arc<str>,
     role_ctx: Option<RoleContext>,
 ) {
     let mut op_observer = crate::op_observer::OpObserver::new();
@@ -485,6 +488,9 @@ async fn drive_session(
                     if let Err(err) = writer.send(reply).await {
                         tracing::warn!(%err, "irc: !ping reply send failed");
                     }
+                }
+                if let Some(req) = parse_token_request(&target, &body, from.as_deref()) {
+                    handle_token_request(&writer, &store, &node_id, &req).await;
                 }
             }
             SessionEvent::Notice { target, body, .. } => {
@@ -737,6 +743,150 @@ fn format_host(nick: &str, user: Option<&str>, host: Option<&str>) -> String {
 /// `!ping` → `pong` echo. Replies to the channel for channel messages,
 /// and to the sender's nick for direct PMs. Returns `None` when the body
 /// isn't `!ping` or the reply target can't be derived.
+/// Parsed `TOKEN <handle> <password>` PRIVMSG arriving as a private
+/// message to the bot. Channel-targeted messages are ignored.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TokenRequest {
+    pub(crate) sender_nick: String,
+    pub(crate) handle: String,
+    pub(crate) password: String,
+}
+
+/// Parse a PRIVMSG body of the shape `TOKEN <handle> <password>` sent
+/// privately to the bot (target is a nick, not a `#channel`).
+///
+/// Whitespace is the separator; passwords may not contain spaces in
+/// this in-channel flow — operators that need spaces in passwords
+/// should use the HTTP `/v1/login` endpoint, where the password is a
+/// JSON string.
+pub(crate) fn parse_token_request(
+    target: &str,
+    body: &str,
+    from: Option<&str>,
+) -> Option<TokenRequest> {
+    if target.starts_with('#') || target.starts_with('&') {
+        return None;
+    }
+    let trimmed = body.trim();
+    let mut parts = trimmed.split_whitespace();
+    if parts.next()? != "TOKEN" {
+        return None;
+    }
+    let handle = parts.next()?;
+    let password = parts.next()?;
+    if parts.next().is_some() || handle.is_empty() || password.is_empty() {
+        return None;
+    }
+    let from = from?;
+    let sender_nick = from.split_once('!').map_or(from, |(n, _)| n).to_owned();
+    Some(TokenRequest {
+        sender_nick,
+        handle: handle.to_owned(),
+        password: password.to_owned(),
+    })
+}
+
+/// Verify the password, mint an `AuthToken`, store its hash, and
+/// PRIVMSG the wire form back to the requesting nick. Writes one
+/// `auth.token.issue` audit row regardless of outcome (with `ok` in
+/// `details`) so failed attempts are auditable.
+async fn handle_token_request(
+    writer: &Writer,
+    store: &Arc<shade_store::Store>,
+    node_id: &str,
+    req: &TokenRequest,
+) {
+    let user = match shade_store::users::get_by_handle(store, &req.handle) {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            send_token_failure(writer, &req.sender_nick, "unknown handle").await;
+            audit_token_issue(store, node_id, &req.sender_nick, &req.handle, false);
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(%err, "irc: store error in TOKEN lookup");
+            send_token_failure(writer, &req.sender_nick, "internal error").await;
+            return;
+        }
+    };
+    let Some(stored_hash) = user.password_hash.as_deref() else {
+        send_token_failure(
+            writer,
+            &req.sender_nick,
+            "password login disabled for this user",
+        )
+        .await;
+        audit_token_issue(store, node_id, &req.sender_nick, &user.handle, false);
+        return;
+    };
+    let ok = match shade_core::verify_password(&req.password, stored_hash) {
+        Ok(b) => b,
+        Err(err) => {
+            tracing::warn!(%err, handle=%user.handle, "irc: invalid stored password hash");
+            send_token_failure(writer, &req.sender_nick, "internal error").await;
+            return;
+        }
+    };
+    if !ok {
+        send_token_failure(writer, &req.sender_nick, "bad password").await;
+        audit_token_issue(store, node_id, &req.sender_nick, &user.handle, false);
+        return;
+    }
+
+    let token = shade_core::AuthToken::random();
+    let now = shade_core::now_ms();
+    let expires_at = now + shade_core::DEFAULT_TTL_MS;
+    if let Err(err) = shade_store::auth_tokens::insert(
+        store,
+        &token.hash(),
+        &user.handle,
+        expires_at,
+        now,
+        node_id,
+    ) {
+        tracing::warn!(%err, "irc: TOKEN store insert failed");
+        send_token_failure(writer, &req.sender_nick, "internal error").await;
+        return;
+    }
+    let line = format!(
+        "PRIVMSG {} :token {} expires {}",
+        req.sender_nick,
+        token.to_wire(),
+        expires_at,
+    );
+    if let Err(err) = writer.send(line).await {
+        tracing::warn!(%err, "irc: TOKEN reply send failed");
+    }
+    audit_token_issue(store, node_id, &req.sender_nick, &user.handle, true);
+}
+
+async fn send_token_failure(writer: &Writer, sender_nick: &str, reason: &str) {
+    let line = format!("PRIVMSG {sender_nick} :token denied: {reason}");
+    if let Err(err) = writer.send(line).await {
+        tracing::warn!(%err, "irc: TOKEN failure send failed");
+    }
+}
+
+fn audit_token_issue(
+    store: &Arc<shade_store::Store>,
+    node_id: &str,
+    sender_nick: &str,
+    handle: &str,
+    ok: bool,
+) {
+    let entry = shade_core::AuditEntry::new(
+        shade_core::now_ms(),
+        format!("irc:{sender_nick}"),
+        "auth.token.issue",
+        shade_core::AuditSource::Irc,
+    )
+    .with_target(handle)
+    .with_details(serde_json::json!({ "ok": ok, "node": node_id }));
+    if let Err(err) = shade_store::audit::insert(store, &entry) {
+        tracing::warn!(%err, "irc: TOKEN audit insert failed");
+    }
+}
+
 fn ping_reply(target: &str, body: &str, from: Option<&str>) -> Option<String> {
     if body.trim() != "!ping" {
         return None;
@@ -784,6 +934,40 @@ mod tests {
             ping_reply("#x", "  !ping  ", Some("a!u@h")).as_deref(),
             Some("PRIVMSG #x :pong")
         );
+    }
+
+    #[test]
+    fn parse_token_request_extracts_handle_and_password() {
+        let req = parse_token_request("shade", "TOKEN alice s3cret", Some("alice!u@h")).unwrap();
+        assert_eq!(req.sender_nick, "alice");
+        assert_eq!(req.handle, "alice");
+        assert_eq!(req.password, "s3cret");
+    }
+
+    #[test]
+    fn parse_token_request_ignores_channel_target() {
+        // Channel target → not a private TOKEN request.
+        assert!(
+            parse_token_request("#shade-test", "TOKEN alice s3cret", Some("alice!u@h")).is_none()
+        );
+    }
+
+    #[test]
+    fn parse_token_request_rejects_extra_words() {
+        // Passwords with whitespace must use the HTTP login endpoint.
+        assert!(parse_token_request("shade", "TOKEN alice my pw", Some("alice!u@h")).is_none());
+    }
+
+    #[test]
+    fn parse_token_request_requires_both_handle_and_password() {
+        assert!(parse_token_request("shade", "TOKEN", Some("alice!u@h")).is_none());
+        assert!(parse_token_request("shade", "TOKEN alice", Some("alice!u@h")).is_none());
+    }
+
+    #[test]
+    fn parse_token_request_ignores_non_token_bodies() {
+        assert!(parse_token_request("shade", "hello", Some("alice!u@h")).is_none());
+        assert!(parse_token_request("shade", "tokenize me", Some("alice!u@h")).is_none());
     }
 
     #[test]

@@ -184,16 +184,28 @@ Cookie verification consults `shade_core::cookies::verify`, which checks the HMA
 
 ## Authentication
 
-Two paths in the eventual design:
+Three paths feed the resolved actor on every `/v1` request, in priority order. The chokepoint is `shade_api::auth::ActorClaim`, which every route extracts.
 
-| Surface | Mechanism |
-|---|---|
-| HTTP+JSON admin API | mTLS client certificate; subject CN maps to a Shade user handle. Operator must hold `+m` (master) or `+n` (owner) for write ops. |
-| In-channel admin (`/MSG shade TOKEN <hex> op #foo nick`) | Short-lived bearer token (≤ 15 min) minted via API: `POST /v1/users/{handle}/irc-tokens`. Hashed-stored, single-use. |
+| Path | Mechanism | Audit actor |
+|---|---|---|
+| **mTLS** (preferred) | Admin listener verifies a client cert chained to `admin.client_ca` and injects `VerifiedActor(cn)`. See [§ Authentication (mTLS)](#authentication-mtls). | Cert subject CN, must equal a `User.handle`. |
+| **Bearer token** | `Authorization: Bearer <wire>` resolves through `shade_api::auth::bearer_auth_middleware` — token wire form is decoded, hashed with SHA-256, and looked up in `auth_tokens`. Match → `VerifiedActor(handle)` for the request. Tokens come from one of two issuance paths below. | `auth_tokens.handle`. |
+| **`X-Actor` header** (dev only) | Falls back when neither of the above is set. Production runs with `admin.require_mtls = true`, so this path is unreachable. | Whatever the operator typed; do not trust. |
+
+### Token issuance
+
+Two ways to mint an [`AuthToken`]:
+
+* **`POST /v1/login`**. Body `{handle, password}`. The server looks up the user, runs Argon2id verify against `password_hash`, and on success mints a fresh 32-byte token. Returns `{token, expires_at}`. The wire form is shown exactly once; the daemon stores only the SHA-256 hash. Default lifetime 1 hour. Rate of expired-row pruning is one DELETE per successful login (no separate sweeper).
+* **In-channel `TOKEN <handle> <password>` PRIVMSG**. The same Argon2id verify happens, but the password and reply travel over IRC. The daemon replies privately with `token <wire> expires <ts_ms>`. This path **leaks the password to the IRC server admin** (the SASL/IRCD trust boundary holds, but the value is observable on the server). Documented for ergonomics; operators that have a TLS path to `/v1/login` should use it instead.
+
+Tokens are stored in `auth_tokens` with `(hash, handle, expires_at, created_at, origin_node)` and **are not mesh-replicated** — they're local-only credentials, deliberately scoping the blast radius of any single-node compromise to that node's tokens.
+
+`PUT /v1/users/:handle/password` sets or rotates the Argon2id hash; `DELETE /v1/users/:handle/password` clears it (disables password login while keeping the user record).
 
 Hostmask passive identification stays for last-seen tracking but **never grants permissions**. Wraith's AUTHSTART/AUTH MD5 challenge, telnet/DCC password auth, and SECPASS are dropped.
 
-> **As of M3:** mTLS enforcement on the admin listener is not yet wired — the API trusts the `X-Actor` request header for audit attribution and accepts any caller. Production deployments must front the admin listener with mTLS today (the listener address default `0.0.0.0:8443` deliberately invites this); native mTLS verification with subject-CN → handle mapping lands in M4 alongside the mesh listener that needs the same primitives. The in-channel token path lands in M6.
+[`AuthToken`]: https://github.com/0xdiNGo/shade
 
 ## Observability
 

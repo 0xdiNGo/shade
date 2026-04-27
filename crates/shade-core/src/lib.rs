@@ -8,20 +8,24 @@
 //! as `BLOB`).
 
 pub mod audit;
+pub mod auth_token;
 pub mod channel;
 pub mod cookies;
 pub mod flags;
 pub mod mask;
+pub mod password;
 pub mod role;
 pub mod role_assignment;
 pub mod time;
 pub mod user;
 
 pub use audit::{AuditEntry, AuditId, AuditSource};
+pub use auth_token::{AuthToken, AuthTokenError, AuthTokenHash, DEFAULT_TTL_MS, TOKEN_BYTES};
 pub use channel::{Channel, ChannelId, ChannelSettings, ChannelUserFlags, NewChannel};
 pub use cookies::{derive_channel_key, Cookie, CookieError, ReplayGuard};
 pub use flags::{FlagSet, FlagSetParseError};
 pub use mask::{Mask, MaskId, MaskKind, NewMask};
+pub use password::{hash as hash_password, verify as verify_password, PasswordError};
 pub use role::{slots_for, Role, ROLE_COUNTS};
 pub use role_assignment::{compute_assignment, holds_role};
 pub use time::now_ms;

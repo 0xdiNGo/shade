@@ -10,6 +10,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
 pub mod audit;
+pub mod auth_tokens;
 pub mod channels;
 pub mod gossip;
 pub mod masks;

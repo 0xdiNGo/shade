@@ -66,6 +66,10 @@ hmac = "0.12"
 sha2 = "0.10"
 hkdf = "0.12"
 
+# Password hashing for /v1/login (Argon2id) + secure random for tokens
+argon2 = "0.5"
+rand = { version = "0.8", features = ["std"] }
+
 # PKI: self-signed CA + node cert generation, peer cert SAN parsing
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring", "x509-parser"] }
 x509-parser = "0.16"
