@@ -63,6 +63,9 @@ r2d2 = "0.8"
 r2d2_sqlite = "0.25"
 refinery = { version = "0.8", features = ["rusqlite"] }
 
+# Testing
+proptest = "1.5"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
