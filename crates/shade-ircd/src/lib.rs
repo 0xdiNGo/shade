@@ -11,6 +11,7 @@
 pub mod caps;
 pub mod connection;
 pub mod message;
+pub mod mode_queue;
 pub mod parser;
 pub mod rate_limit;
 pub mod sasl;
@@ -22,6 +23,7 @@ pub use connection::{
     WriteRateConfig, Writer,
 };
 pub use message::{Command, Message, ParseError, Tags};
+pub use mode_queue::{Direction, ModeChange, ModeQueue, Priority, QueueKind};
 pub use parser::{parse, parse_str};
 pub use sasl::{authenticate_start, sasl_authenticate_lines, SaslMechanism};
 pub use state::{ChannelState, Member, PrefixMap, ServerState, StateEvent};
