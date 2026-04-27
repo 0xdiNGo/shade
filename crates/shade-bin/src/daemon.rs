@@ -54,7 +54,11 @@ pub async fn run(cfg: Config) -> Result<()> {
     let ready_handle = ReadyHandle::from_arc(readiness.irc_connected_handle());
     let session = Session::spawn(session_config, ready_handle);
     let session_writer = session.writer();
-    let session_task = tokio::spawn(drive_session(session, session_writer.clone()));
+    let session_task = tokio::spawn(drive_session(
+        session,
+        session_writer.clone(),
+        store.clone(),
+    ));
 
     let admin_router = shade_api::admin::router(AdminState {
         readiness: readiness.clone(),
@@ -179,14 +183,32 @@ fn parse_server_addr(s: &str) -> Result<SocketAddr> {
         .ok_or_else(|| anyhow!("no addresses returned for {s}"))
 }
 
-async fn drive_session(mut session: Session, writer: Writer) {
+async fn drive_session(mut session: Session, writer: Writer, store: Arc<shade_store::Store>) {
     while let Some(evt) = session.next_event().await {
         match evt {
             SessionEvent::Welcomed { nick } => {
                 tracing::info!(%nick, "irc: registered");
             }
-            SessionEvent::SelfJoined { channel } => {
-                tracing::info!(%channel, "irc: joined channel");
+            SessionEvent::Joined {
+                channel,
+                nick,
+                user,
+                host,
+                is_self,
+            } => {
+                if is_self {
+                    tracing::info!(%channel, "irc: joined channel");
+                    continue;
+                }
+                apply_join_policy(
+                    &writer,
+                    &store,
+                    &channel,
+                    &nick,
+                    user.as_deref(),
+                    host.as_deref(),
+                )
+                .await;
             }
             SessionEvent::SaslOutcome { succeeded } => {
                 tracing::info!(succeeded, "irc: sasl outcome");
@@ -204,6 +226,92 @@ async fn drive_session(mut session: Session, writer: Writer) {
             SessionEvent::Notice { .. } => {}
         }
     }
+}
+
+/// Run the on-JOIN policy for a peer:
+///
+/// 1. Check the channel's ban list — if the peer's hostmask matches, KICK
+///    them with the ban reason.
+/// 2. Otherwise, look the peer up by hostmask (passive identification).
+///    If they're a known user with `+o` in this channel, MODE +o them.
+///
+/// All store calls are short-lived synchronous SQLite reads; we do them
+/// inline. M5 will route op decisions through the role-distribution layer
+/// so only the bot holding `ROLE_OP` actually sets the mode.
+async fn apply_join_policy(
+    writer: &Writer,
+    store: &Arc<shade_store::Store>,
+    channel: &str,
+    nick: &str,
+    user: Option<&str>,
+    host: Option<&str>,
+) {
+    let host_string = format_host(nick, user, host);
+
+    let chan = match shade_store::channels::get_by_name(store, channel) {
+        Ok(Some(c)) => c,
+        Ok(None) => return, // channel not under management; nothing to do
+        Err(err) => {
+            tracing::warn!(%err, %channel, "irc: store error looking up channel");
+            return;
+        }
+    };
+
+    // Ban check first — kicking takes precedence over auto-op.
+    match shade_store::masks::match_ban(store, chan.id, &host_string) {
+        Ok(Some(mask)) => {
+            let reason = mask.reason.as_deref().unwrap_or("banned");
+            let line = format!("KICK {channel} {nick} :{reason}");
+            if let Err(err) = writer.send(line).await {
+                tracing::warn!(%err, %channel, %nick, "irc: kick send failed");
+            } else {
+                tracing::info!(%channel, %nick, %host_string, mask = %mask.mask, "irc: kicked banned peer");
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::warn!(%err, %channel, "irc: store error in ban check");
+            return;
+        }
+    }
+
+    // Identify by hostmask, then look up channel-specific flags.
+    let user_record = match shade_store::users::match_by_host(store, &host_string) {
+        Ok(Some(u)) => u,
+        Ok(None) => return, // unknown peer; nothing to do
+        Err(err) => {
+            tracing::warn!(%err, "irc: store error in user identification");
+            return;
+        }
+    };
+
+    let chan_flags = match shade_store::channels::get_user_flags(store, chan.id, user_record.id) {
+        Ok(Some(row)) => row.flags,
+        Ok(None) => return, // user known but no per-channel flags here
+        Err(err) => {
+            tracing::warn!(%err, "irc: store error reading user flags");
+            return;
+        }
+    };
+
+    if chan_flags.contains_letter(shade_core::flags::USER_OP) {
+        let line = format!("MODE {channel} +o {nick}");
+        if let Err(err) = writer.send(line).await {
+            tracing::warn!(%err, %channel, %nick, "irc: auto-op send failed");
+        } else {
+            tracing::info!(%channel, %nick, handle = %user_record.handle, "irc: auto-opped");
+        }
+    }
+}
+
+/// Reconstruct a `nick!user@host` string for hostmask matching. Falls
+/// back to `nick!*@*` when user/host weren't known yet (which can happen
+/// if a JOIN arrives before WHO has populated state).
+fn format_host(nick: &str, user: Option<&str>, host: Option<&str>) -> String {
+    let user = user.unwrap_or("*");
+    let host = host.unwrap_or("*");
+    format!("{nick}!{user}@{host}")
 }
 
 /// `!ping` → `pong` echo. Replies to the channel for channel messages,
