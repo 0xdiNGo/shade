@@ -1748,6 +1748,8 @@ dependencies = [
  "r2d2_sqlite",
  "refinery",
  "rusqlite",
+ "serde_json",
+ "shade-core",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
