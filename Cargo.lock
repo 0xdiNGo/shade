@@ -1715,6 +1715,7 @@ version = "0.0.0"
 name = "shade-ircd"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "proptest",
  "rustls",
  "thiserror 2.0.18",

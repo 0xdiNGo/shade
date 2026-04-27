@@ -56,6 +56,9 @@ figment = { version = "0.10", features = ["toml", "env"] }
 anyhow = "1"
 thiserror = "2"
 
+# Encoding
+base64 = "0.22"
+
 # Utilities
 ulid = { version = "1", features = ["serde"] }
 jiff = { version = "0.1", features = ["serde"] }
