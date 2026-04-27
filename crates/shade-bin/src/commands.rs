@@ -40,6 +40,11 @@ pub fn dispatch(cli: &Cli) -> Result<()> {
             actor,
             client,
         } => shadectl::audit(*limit, actor.as_deref(), client, &cli.config),
+        Command::Login {
+            handle,
+            password_stdin,
+            client,
+        } => shadectl::login(handle, *password_stdin, client, &cli.config),
     }
 }
 

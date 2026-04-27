@@ -111,6 +111,24 @@ pub enum Command {
         #[command(flatten)]
         client: ClientArgs,
     },
+
+    /// Exchange a handle + password for a bearer token.
+    ///
+    /// Reads the password from stdin (no echo) unless `--password-stdin`
+    /// makes it explicit. Prints `{ "token": "...", "expires_at": ms }`
+    /// to stdout — pipe through `jq -r .token` to extract the token
+    /// string for `SHADECTL_TOKEN`.
+    Login {
+        /// Handle to authenticate as.
+        #[arg(long)]
+        handle: String,
+        /// Read the password as the entire first line of stdin.
+        /// Without this flag the CLI prompts on the controlling tty.
+        #[arg(long)]
+        password_stdin: bool,
+        #[command(flatten)]
+        client: ClientArgs,
+    },
 }
 
 /// Common options for any subcommand that talks to the admin API.
@@ -144,6 +162,13 @@ pub struct ClientArgs {
     /// file (the same root that signs admin client certs).
     #[arg(long, env = "SHADECTL_CA_BUNDLE")]
     pub ca_bundle: Option<PathBuf>,
+
+    /// Bearer token issued by `shade login` or the in-channel TOKEN
+    /// flow. Sent as `Authorization: Bearer <token>` and used to
+    /// authenticate when the daemon does not have an mTLS client cert
+    /// for this operator.
+    #[arg(long, env = "SHADECTL_TOKEN")]
+    pub token: Option<String>,
 
     /// Pretty-print JSON output (multi-line, indented).
     #[arg(long)]

@@ -28,6 +28,7 @@ use crate::config::Config;
 struct ApiClient {
     base: String,
     actor: String,
+    token: Option<String>,
     pretty: bool,
     agent: ureq::Agent,
 }
@@ -56,6 +57,7 @@ impl ApiClient {
         Ok(Self {
             base,
             actor,
+            token: args.token.clone(),
             pretty: args.pretty,
             agent,
         })
@@ -63,7 +65,11 @@ impl ApiClient {
 
     fn request(&self, method: &str, path: &str) -> ureq::Request {
         let url = format!("{}{path}", self.base);
-        self.agent.request(method, &url).set("X-Actor", &self.actor)
+        let mut req = self.agent.request(method, &url).set("X-Actor", &self.actor);
+        if let Some(token) = &self.token {
+            req = req.set("Authorization", &format!("Bearer {token}"));
+        }
+        req
     }
 
     fn run_json(&self, req: ureq::Request, body: Option<&serde_json::Value>) -> Result<()> {
@@ -407,6 +413,39 @@ pub fn audit(
         let _ = write!(path, "&actor={}", percent_encode(a));
     }
     c.run_json(c.request("GET", &path), None)
+}
+
+pub fn login(
+    handle: &str,
+    password_stdin: bool,
+    client_args: &ClientArgs,
+    config: &Path,
+) -> Result<()> {
+    let password = read_password(password_stdin)?;
+    let c = ApiClient::from_args(config, client_args)?;
+    let body = json!({ "handle": handle, "password": password });
+    c.run_json(c.request("POST", "/v1/login"), Some(&body))
+}
+
+fn read_password(stdin: bool) -> Result<String> {
+    use std::io::{self, BufRead, Write as _};
+    if stdin {
+        let mut line = String::new();
+        io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .context("reading password from stdin")?;
+        return Ok(line.trim_end_matches(['\n', '\r']).to_owned());
+    }
+    eprint!("password: ");
+    io::stderr().flush().ok();
+    let mut line = String::new();
+    io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("reading password from terminal")?;
+    eprintln!();
+    Ok(line.trim_end_matches(['\n', '\r']).to_owned())
 }
 
 #[cfg(test)]

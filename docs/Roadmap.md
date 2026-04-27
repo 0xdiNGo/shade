@@ -31,8 +31,8 @@ Two Shade nodes, mesh-linked over mTLS, both joined to `#shade-test` on a real I
 * The remaining chanset toggles (we ship 12 of ~25 in MVP)
 * The remaining flood thresholds (we ship 4 of 12 in MVP)
 * The remaining role types (we ship 6 of 13; RESOLV dropped entirely)
-* In-channel `/MSG TOKEN op #foo nick` admin flow (token endpoint scaffolded; PRIVMSG router lands in v0.2)
-* Argon2id-backed `POST /v1/login` issuing short-lived bearer tokens for operators without a distributed client cert
+* The `op #foo nick` half of the in-channel admin flow (`TOKEN <handle> <password>` for token issuance is shipped; the `op`/`deop`/`mode` etc. command handlers live in v0.2)
+* Per-handle rate limiting on `/v1/login` (Argon2id is slow but not infinite)
 * CRL/OCSP for admin and node certs — today, lost certs require operator-driven CA rotation
 
 ## Out forever (intentionally)

@@ -1,21 +1,33 @@
 //! Caller-identity extraction for the admin API.
 //!
-//! Two paths feed the resolved actor:
+//! Three paths can feed the resolved actor, in priority order:
 //!
 //! 1. **mTLS** (production). The admin listener verifies the client cert
 //!    chain against an operator CA and inserts [`VerifiedActor`] into the
 //!    request extensions before the request reaches the router. The CN of
 //!    the client cert is the operator's `User.handle`.
-//! 2. **`X-Actor` header** (dev / test). When no [`VerifiedActor`] is
-//!    present the extractor falls back to reading the `X-Actor` header.
+//! 2. **`Authorization: Bearer <token>`** (HTTP login). The
+//!    [`bearer_auth_middleware`] hashes the presented token with SHA-256,
+//!    looks it up in `auth_tokens`, validates expiry, and (on hit)
+//!    injects a [`VerifiedActor`] for the rest of the request — same
+//!    extension type the mTLS path uses. The `/v1/login` route mints
+//!    these tokens; the in-channel `TOKEN` PRIVMSG flow mints
+//!    equivalents from the IRC side.
+//! 3. **`X-Actor` header** (dev / test). When no [`VerifiedActor`] has
+//!    been set the extractor falls back to reading the `X-Actor` header.
 //!    Production deployments must run with `admin.require_mtls = true`
 //!    so this path is never taken.
 //!
-//! When neither is present the handler defaults to the node ID for audit.
+//! When none is present the handler defaults to the node ID for audit.
 
 use axum::async_trait;
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
+use axum::http::{Request, StatusCode};
+use axum::middleware::Next;
+use axum::response::Response;
+
+use crate::v1::ApiState;
 
 /// Marker placed in the request extensions by the TLS accept loop after a
 /// client cert chain has been verified. The wrapped string is the cert
@@ -70,6 +82,69 @@ where
             .map(str::to_owned);
         Ok(Self(header))
     }
+}
+
+/// axum middleware that resolves `Authorization: Bearer <token>` to a
+/// [`VerifiedActor`] when no cert-derived actor is already present.
+///
+/// Behavior:
+/// * If `VerifiedActor` is already in the request extensions (mTLS),
+///   pass through untouched.
+/// * If no `Authorization` header is present, pass through (the
+///   `X-Actor` header fallback in [`ActorClaim`] still applies).
+/// * If `Authorization: Bearer <token>` is present, parse the wire
+///   form, hash with SHA-256, look up in `auth_tokens`, check expiry.
+///   On match → inject `VerifiedActor(handle)`. On any failure →
+///   return 401 immediately (don't fall through to dev-only `X-Actor`).
+///
+/// Constant-time comparison isn't needed because the lookup is a
+/// SQLite primary-key index lookup — the success/failure timing is
+/// dominated by the Argon2-free hash and the SQLite read, both of
+/// which are independent of secret-bit content.
+pub async fn bearer_auth_middleware(
+    State(state): State<ApiState>,
+    mut req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if req.extensions().get::<VerifiedActor>().is_some() {
+        return next.run(req).await;
+    }
+    let Some(auth_header) = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return next.run(req).await;
+    };
+    let Some(wire) = auth_header.strip_prefix("Bearer ").map(str::trim) else {
+        return next.run(req).await;
+    };
+
+    let Ok(token) = shade_core::AuthToken::from_wire(wire) else {
+        return unauthorized();
+    };
+    let stored = match shade_store::auth_tokens::get_by_hash(&state.store, &token.hash()) {
+        Ok(Some(s)) => s,
+        Ok(None) => return unauthorized(),
+        Err(err) => {
+            tracing::error!(error = %err, "auth: store error in bearer lookup");
+            return unauthorized();
+        }
+    };
+    if stored.expires_at <= shade_core::now_ms() {
+        return unauthorized();
+    }
+    req.extensions_mut().insert(VerifiedActor(stored.handle));
+    next.run(req).await
+}
+
+fn unauthorized() -> Response {
+    use axum::response::IntoResponse;
+    (
+        StatusCode::UNAUTHORIZED,
+        axum::Json(serde_json::json!({ "error": "unauthorized" })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

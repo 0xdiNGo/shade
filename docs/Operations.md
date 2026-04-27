@@ -186,6 +186,44 @@ shade issue-admin-cert --handle alice \
 
 Revocation today is by user removal: `shadectl users delete alice` strips the row and any per-channel flags. The cert itself is still cryptographically valid until expiry; until CRL/OCSP lands (v0.2), a compromised operator cert means the CA must be rotated to invalidate it.
 
+#### Login + bearer tokens (no-cert path)
+
+For occasional ops or scripted use where distributing an admin client cert is overkill, an operator can authenticate with `{handle, password}` and use the resulting bearer token instead.
+
+```sh
+# 1. Set a password on the user record. Run as an existing admin
+#    (cert or another token).
+shadectl users upsert alice --flags +a
+shadectl --pretty users show alice    # confirm the record
+echo 'hunter2' | curl -sf \
+  --cacert /etc/shade/pki/botnet-ca.pem \
+  --cert /etc/shade/admin/root.pem --key /etc/shade/admin/root.key \
+  -X PUT https://shade-iad-01.internal:8443/v1/users/alice/password \
+  -H 'content-type: application/json' \
+  -d '{"password":"hunter2"}'
+
+# 2. The operator runs `shade login` with --password-stdin (or
+#    interactively at the prompt). The response carries the wire
+#    token and its expiry.
+echo 'hunter2' | shade login --handle alice --password-stdin
+# {"token":"abc...","expires_at":1714530000000}
+
+# 3. Use the token. SHADECTL_TOKEN sets it for the rest of the shell;
+#    --token <wire> works one-off.
+export SHADECTL_TOKEN=abc...
+shadectl users list
+```
+
+Token lifetime is 1 hour. The wire form is shown to the operator exactly once; from then on the daemon stores only the SHA-256 hash. Revocation: `DELETE /v1/users/:handle/password` clears the password hash (preventing new logins for that handle) and `shadectl users delete <handle>` removes the user record entirely. Existing tokens for a deleted handle remain in `auth_tokens` until their `expires_at`; the next login attempt will prune them via the per-login GC sweep. For an immediate cut-off, `DELETE` the user and accept that no live tokens can match a now-missing handle.
+
+The same flow is available over IRC for operators who already have an authenticated session to the bot:
+
+```
+/MSG shade TOKEN alice hunter2
+```
+
+The bot replies privately with `token <wire> expires <ts_ms>`. **Caveat**: the password and reply traverse the IRC server in cleartext above the TLS layer — fine in a trusted single-network setup, but operators with a TLS path to `/v1/login` should prefer that.
+
 #### Mesh PSK rotation
 
 ```sh

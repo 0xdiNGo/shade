@@ -77,10 +77,15 @@ impl ApiState {
 /// Build the `/v1/...` admin router.
 pub fn router(state: ApiState) -> Router {
     Router::new()
+        .route("/v1/login", axum::routing::post(login))
         .route("/v1/users", get(list_users).post(create_user))
         .route(
             "/v1/users/:handle",
             get(get_user).patch(patch_user).delete(delete_user),
+        )
+        .route(
+            "/v1/users/:handle/password",
+            put(put_user_password).delete(delete_user_password),
         )
         .route("/v1/channels", get(list_channels).post(create_channel))
         .route(
@@ -101,6 +106,10 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/masks/:id", delete(delete_mask))
         .route("/v1/audit", get(list_audit))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::bearer_auth_middleware,
+        ))
         .with_state(state)
 }
 
@@ -112,6 +121,8 @@ pub enum ApiError {
     NotFound,
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("unauthorized")]
+    Unauthorized,
     #[error(transparent)]
     Store(#[from] shade_store::StoreError),
 }
@@ -121,6 +132,7 @@ impl axum::response::IntoResponse for ApiError {
         let (status, message) = match &self {
             Self::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             Self::Store(_) => {
                 tracing::error!(error = %self, "api: store error");
                 (
@@ -666,6 +678,162 @@ async fn list_audit(
     Ok(Json(rows))
 }
 
+// ----- login + password ---------------------------------------------------
+
+#[derive(Deserialize)]
+struct LoginBody {
+    handle: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+struct LoginResponse {
+    token: String,
+    expires_at: i64,
+}
+
+/// `POST /v1/login` — exchange `{handle, password}` for a bearer token.
+///
+/// Verifies the supplied password against the user's Argon2id-hashed
+/// `password_hash`, then mints an [`shade_core::AuthToken`], stores its
+/// hash in `auth_tokens`, and returns the wire form. The wire token is
+/// shown to the operator exactly once; from then on the daemon only
+/// keeps the SHA-256 hash. Lifetime: [`shade_core::DEFAULT_TTL_MS`]
+/// (1 hour).
+///
+/// Note that this endpoint accepts a plaintext password in the request
+/// body — it is **only safe** behind TLS. Operators must run with
+/// `admin.require_mtls = true` (the default) or front the listener
+/// with TLS termination before exposing it to anything but the local
+/// loopback.
+async fn login(
+    State(state): State<ApiState>,
+    claim: ActorClaim,
+    Json(body): Json<LoginBody>,
+) -> Result<Json<LoginResponse>, ApiError> {
+    if body.handle.trim().is_empty() {
+        return Err(ApiError::BadRequest("handle must not be empty".into()));
+    }
+    let user = shade_store::users::get_by_handle(&state.store, &body.handle)?
+        .ok_or(ApiError::Unauthorized)?;
+    let stored_hash = user
+        .password_hash
+        .as_deref()
+        .ok_or(ApiError::Unauthorized)?;
+    let ok = shade_core::verify_password(&body.password, stored_hash)
+        .map_err(|_| ApiError::Unauthorized)?;
+    if !ok {
+        return Err(ApiError::Unauthorized);
+    }
+
+    let token = shade_core::AuthToken::random();
+    let now = shade_core::now_ms();
+    let expires_at = now + shade_core::DEFAULT_TTL_MS;
+    shade_store::auth_tokens::insert(
+        &state.store,
+        &token.hash(),
+        &user.handle,
+        expires_at,
+        now,
+        &state.node_id,
+    )?;
+    audit(
+        &state,
+        &claim,
+        "auth.login",
+        Some(&user.handle),
+        &serde_json::json!({ "expires_at": expires_at }),
+    );
+    // Best-effort GC of stale rows; one DELETE per login keeps the
+    // table bounded without a separate sweeper task.
+    let _ = shade_store::auth_tokens::delete_expired(&state.store, now);
+    Ok(Json(LoginResponse {
+        token: token.to_wire(),
+        expires_at,
+    }))
+}
+
+#[derive(Deserialize)]
+struct PasswordBody {
+    password: String,
+}
+
+/// `PUT /v1/users/:handle/password` — set or rotate a user's password.
+///
+/// Hashes the supplied password with Argon2id and stores the encoded
+/// PHC string on the user. Idempotent on repeat call (each call rotates
+/// the salt, producing a fresh hash). Authentication uses the same
+/// `ActorClaim` chain as every other route — typically a cert-verified
+/// admin or a token-bearing operator.
+async fn put_user_password(
+    State(state): State<ApiState>,
+    claim: ActorClaim,
+    Path(handle): Path<String>,
+    Json(body): Json<PasswordBody>,
+) -> Result<StatusCode, ApiError> {
+    if body.password.is_empty() {
+        return Err(ApiError::BadRequest("password must not be empty".into()));
+    }
+    let mut user =
+        shade_store::users::get_by_handle(&state.store, &handle)?.ok_or(ApiError::NotFound)?;
+    let encoded = shade_core::hash_password(&body.password)
+        .map_err(|e| ApiError::BadRequest(format!("hashing failed: {e}")))?;
+    user.password_hash = Some(encoded);
+    let nu = NewUser {
+        handle: user.handle.clone(),
+        password_hash: user.password_hash.clone(),
+        is_bot: user.is_bot,
+        global_flags: user.global_flags,
+        comment: user.comment.clone(),
+        hosts: user.hosts.clone(),
+    };
+    let updated = shade_store::users::upsert(&state.store, &nu, &state.node_id)?;
+    audit(
+        &state,
+        &claim,
+        "user.password.set",
+        Some(&updated.handle),
+        &serde_json::Value::Null,
+    );
+    state.broadcast_upsert(UpsertKind::User(updated)).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /v1/users/:handle/password` — clear a user's password.
+///
+/// Disables password login for that user without removing the user
+/// record. Cert-based mTLS auth keeps working.
+async fn delete_user_password(
+    State(state): State<ApiState>,
+    claim: ActorClaim,
+    Path(handle): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let mut user =
+        shade_store::users::get_by_handle(&state.store, &handle)?.ok_or(ApiError::NotFound)?;
+    if user.password_hash.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    user.password_hash = None;
+    let nu = NewUser {
+        handle: user.handle.clone(),
+        password_hash: None,
+        is_bot: user.is_bot,
+        global_flags: user.global_flags,
+        comment: user.comment.clone(),
+        hosts: user.hosts.clone(),
+    };
+    let updated = shade_store::users::upsert(&state.store, &nu, &state.node_id)?;
+    audit(
+        &state,
+        &claim,
+        "user.password.clear",
+        Some(&updated.handle),
+        &serde_json::Value::Null,
+    );
+    state.broadcast_upsert(UpsertKind::User(updated)).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,5 +1103,214 @@ mod tests {
         let body = json_body(resp).await;
         let entries = body.as_array().unwrap();
         assert_eq!(entries[0]["actor"], "@alice");
+    }
+
+    // ----- login + bearer-token auth ------------------------------------
+
+    /// End-to-end: set a password via PUT /password → POST /v1/login →
+    /// receive a token → use the token to authenticate a subsequent
+    /// request → audit row carries the cert/login handle as actor.
+    #[tokio::test]
+    async fn login_issues_token_that_authenticates_subsequent_requests() {
+        let state = fresh_state();
+        let app = router(state.clone());
+
+        // Bootstrap user.
+        let resp = app
+            .clone()
+            .oneshot(req_json(
+                "POST",
+                "/v1/users",
+                &serde_json::json!({ "handle": "alice", "global_flags": "+a" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Set password.
+        let resp = app
+            .clone()
+            .oneshot(req_json(
+                "PUT",
+                "/v1/users/alice/password",
+                &serde_json::json!({ "password": "hunter2" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Login.
+        let resp = app
+            .clone()
+            .oneshot(req_json(
+                "POST",
+                "/v1/login",
+                &serde_json::json!({ "handle": "alice", "password": "hunter2" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        let token = body["token"].as_str().unwrap();
+        assert!(!token.is_empty());
+
+        // Authenticated request via Authorization: Bearer.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/channels")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(r##"{"name":"#x"}"##))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Audit row should be tagged with the login handle, not "node-test".
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/audit?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        let entries = body.as_array().unwrap();
+        let actors: Vec<&str> = entries
+            .iter()
+            .map(|e| e["actor"].as_str().unwrap())
+            .collect();
+        assert!(actors.contains(&"alice"), "actors were: {actors:?}");
+    }
+
+    #[tokio::test]
+    async fn login_rejects_wrong_password() {
+        let state = fresh_state();
+        let app = router(state.clone());
+        let _ = app
+            .clone()
+            .oneshot(req_json(
+                "POST",
+                "/v1/users",
+                &serde_json::json!({ "handle": "alice" }),
+            ))
+            .await
+            .unwrap();
+        let _ = app
+            .clone()
+            .oneshot(req_json(
+                "PUT",
+                "/v1/users/alice/password",
+                &serde_json::json!({ "password": "secret" }),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(req_json(
+                "POST",
+                "/v1/login",
+                &serde_json::json!({ "handle": "alice", "password": "wrong" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn login_rejects_user_with_no_password_set() {
+        let state = fresh_state();
+        let app = router(state.clone());
+        let _ = app
+            .clone()
+            .oneshot(req_json(
+                "POST",
+                "/v1/users",
+                &serde_json::json!({ "handle": "alice" }),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(req_json(
+                "POST",
+                "/v1/login",
+                &serde_json::json!({ "handle": "alice", "password": "anything" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn invalid_bearer_token_returns_401() {
+        let state = fresh_state();
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/users")
+                    .header("authorization", "Bearer not-a-real-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn delete_password_disables_login() {
+        let state = fresh_state();
+        let app = router(state.clone());
+        let _ = app
+            .clone()
+            .oneshot(req_json(
+                "POST",
+                "/v1/users",
+                &serde_json::json!({ "handle": "alice" }),
+            ))
+            .await
+            .unwrap();
+        let _ = app
+            .clone()
+            .oneshot(req_json(
+                "PUT",
+                "/v1/users/alice/password",
+                &serde_json::json!({ "password": "secret" }),
+            ))
+            .await
+            .unwrap();
+
+        // Delete password.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/users/alice/password")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Login should now fail.
+        let resp = app
+            .oneshot(req_json(
+                "POST",
+                "/v1/login",
+                &serde_json::json!({ "handle": "alice", "password": "secret" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
