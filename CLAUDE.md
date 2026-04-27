@@ -54,6 +54,14 @@ Update the relevant page in the same PR that introduces the architectural change
 
 **M1 ✅** scaffold, CI, daemon, store, container.
 
-**M2 (in progress)** — IRC client. 6 of 7 PRs landed or queued (parser, fuzz, connection, caps + SASL, state machine, mode queue). The last M2 PR is the **wire-up**: a `shade-ircd::session` async loop that ties Connection + CapNegotiation + SASL + ServerState + ModeQueue together, plus integration in `shade-bin/daemon.rs` (flip `/readyz`'s `irc_connected` on RPL_WELCOME, `!ping → pong` handler), plus an `ergo` service in `deploy/compose.yaml` so `docker compose up` is the M2 demo.
+**M2 ✅** — IRC client. Parser + fuzz harness, TLS connection runner with token-bucket rate limiter and exponential backoff, IRCv3 cap negotiation, SASL PLAIN/EXTERNAL, channel state machine, outbound MODE batcher, and the `shade-ircd::session` async loop tying it all together. `docker compose up --build` runs ergo + shade end-to-end; `/readyz`'s `irc_connected` flips on RPL_WELCOME; `!ping → pong` works.
 
-**M3–M6** — see `docs/Roadmap.md`.
+**M3 (in progress)** — Domain + HTTP API + shadectl + auto-op/auto-kick. Planned PR sequence:
+
+1. `shade-core` domain types (`FlagSet`, `User`, `Channel`, `ChannelSettings`, `ChannelUserFlags`, `Mask`, `Role`, `AuditEntry`).
+2. `shade-store` accessors (CRUD over the V0001 tables, returning shade-core types).
+3. `shade-api` REST routes for users / channels / masks, with audit-log writes.
+4. `shadectl` CLI subcommands talking to the admin API.
+5. Behavior wire-up: auto-op `+o` users on JOIN, kick `+k`/banned hosts on JOIN.
+
+**M4–M6** — see `docs/Roadmap.md`.
