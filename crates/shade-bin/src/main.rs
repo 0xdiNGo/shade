@@ -6,6 +6,7 @@ mod cli;
 mod commands;
 mod config;
 mod daemon;
+mod op_observer;
 mod pki;
 mod shadectl;
 mod telemetry;

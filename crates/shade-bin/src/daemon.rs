@@ -346,6 +346,13 @@ async fn drive_session(
     store: Arc<shade_store::Store>,
     role_ctx: Option<RoleContext>,
 ) {
+    let mut op_observer = crate::op_observer::OpObserver::new();
+    let observer_ctx = role_ctx
+        .as_ref()
+        .map(|r| crate::op_observer::ObserverContext {
+            node_id: r.node_id.clone(),
+            mesh_psk: r.mesh_psk.clone(),
+        });
     while let Some(evt) = session.next_event().await {
         match evt {
             SessionEvent::Welcomed { nick } => {
@@ -373,6 +380,42 @@ async fn drive_session(
                 )
                 .await;
             }
+            SessionEvent::ModeChanged {
+                target,
+                by,
+                modes,
+                args,
+            } => {
+                // Track every observed +o for cookie verification +
+                // mass-op detection. Walk the mode chars + args side
+                // by side; only +o consumes an arg here, since other
+                // arg-bearing modes (b/e/I/k/l) aren't ops.
+                if !target.starts_with('#') && !target.starts_with('&') {
+                    continue;
+                }
+                let now = shade_core::now_ms();
+                let mut adding = true;
+                let mut arg_idx = 0;
+                for c in modes.chars() {
+                    match c {
+                        '+' => adding = true,
+                        '-' => adding = false,
+                        'o' if adding => {
+                            if let Some(target_nick) = args.get(arg_idx) {
+                                op_observer.record_op(&target, target_nick, &by, now);
+                            }
+                            arg_idx += 1;
+                        }
+                        'o' | 'v' => {
+                            arg_idx += 1;
+                        }
+                        'b' | 'e' | 'I' | 'k' => arg_idx += 1,
+                        'l' if adding => arg_idx += 1,
+                        _ => {}
+                    }
+                }
+                op_observer.maybe_sweep(now);
+            }
             SessionEvent::SaslOutcome { succeeded } => {
                 tracing::info!(succeeded, "irc: sasl outcome");
             }
@@ -386,7 +429,15 @@ async fn drive_session(
                     }
                 }
             }
-            SessionEvent::Notice { .. } => {}
+            SessionEvent::Notice { target, body, .. } => {
+                if let (Some(wire), Some(ctx)) = (
+                    crate::op_observer::extract_cookie_wire(&body),
+                    observer_ctx.as_ref(),
+                ) {
+                    let now = shade_core::now_ms();
+                    op_observer.record_cookie_notice(&target, wire, ctx, now);
+                }
+            }
         }
     }
 }
