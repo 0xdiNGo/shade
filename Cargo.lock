@@ -1681,10 +1681,14 @@ dependencies = [
  "metrics-exporter-prometheus",
  "serde",
  "serde_json",
+ "shade-core",
+ "shade-store",
+ "thiserror 2.0.18",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
+ "ulid",
 ]
 
 [[package]]

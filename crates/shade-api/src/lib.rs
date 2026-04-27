@@ -10,3 +10,4 @@
 
 pub mod admin;
 pub mod metrics;
+pub mod v1;
