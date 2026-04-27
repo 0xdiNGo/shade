@@ -59,6 +59,10 @@ thiserror = "2"
 # Encoding
 base64 = "0.22"
 
+# PKI: self-signed CA + node cert generation, peer cert SAN parsing
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring", "x509-parser"] }
+x509-parser = "0.16"
+
 # HTTP client for shadectl
 ureq = { version = "2.10", features = ["json"], default-features = false }
 
