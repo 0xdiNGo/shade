@@ -19,7 +19,7 @@ The IRC server is **not trusted for op authority**. It is trusted to deliver mes
 |---|---|---|
 | Network-side eavesdropper | Read or modify mesh traffic. | mTLS over rustls; HMAC-SHA256 cookie verification on op MODEs. |
 | Compromised IRC user | Spoof a hostmask, send PRIVMSGs. | Hostmask matching is identification-only; permissions live in `channel_user_flags`. |
-| Compromised single Shade node | Issue arbitrary IRC commands, broadcast bogus mesh frames. | Role rotation: a node only acts on roles it holds. Other nodes flag uncertified ops within the 5 s grace window; a flood of ops trips the mass-op alarm. The mesh PSK + CA are still leaked, so the next step is rotation (see `docs/Operations.md`). |
+| Compromised single Shade node | Issue arbitrary IRC commands, broadcast bogus mesh frames. | Role rotation: a node only acts on roles it holds. Other nodes flag uncertified ops within the 5 s grace window; ≥ 5 uncertified ops in 10 s trips automatic deop of every recently-opped victim by the deterministic ROLE_OP holder, with a 60 s cooldown to prevent flapping. The mesh PSK + CA are still leaked, so the next step is rotation (see `docs/Operations.md`). |
 | Compromised peer cert | Connect to the mesh, exchange `PeerHello`, push upserts. | Cert SAN is bound to `node_id`; `PeerHello.node_id` must match. CA pinning prevents an unrelated CA's certs from authenticating. Stolen-cert revocation is a CRL-list TODO (v0.2). |
 | Compromised mesh PSK | Mint valid cookies for any channel. | Full rebuild required — operator runbook covers PSK rotation. |
 | Network partition | Both halves think they hold `ROLE_OP`; double-ops happen. | Cookie verification keeps both ops legitimate (only the mesh sees who issued each). On heal, snapshot reconciliation makes the eligible-peer set whole again before the next rebalance tick. |
@@ -43,7 +43,7 @@ The IRC server is **not trusted for op authority**. It is trusted to deliver mes
 
 1. **Mesh PSK leak.** Procedure in `docs/Operations.md`: pause writes, rotate PSK, redeploy, force snapshot resync. Cookie ops re-derive keys automatically.
 2. **CA private-key leak.** Re-bootstrap the CA on a new node, reissue every node cert, re-deploy. Procedure in `docs/Operations.md`.
-3. **Single node compromise without immediate detection.** Time window between compromise and detection is bounded by the mass-op alarm and operator vigilance on the audit log. Logging into the box and inspecting the SQLite + audit_log state is the recovery path.
+3. **Single node compromise without immediate detection.** Time window between compromise and detection is bounded by the mass-op trip threshold (5 uncertified ops in 10 s) and operator vigilance on the audit log. The automatic deop reverses observable damage; logging into the box and inspecting the SQLite + audit_log state is the recovery path.
 4. **Network partition longer than the cookie grace window.** Cookies time out; the partition halves cannot certify each other's ops. Reconnect resumes normal operation; ops issued during the partition are recorded but not certified post-fact (the relevant grace window has passed).
 
 ## Open security work
@@ -52,6 +52,5 @@ The IRC server is **not trusted for op authority**. It is trusted to deliver mes
 |---|---|---|
 | Argon2id-backed `POST /v1/login` | Token issuance for operators without cert distribution. | Roadmap § Out of MVP scope |
 | In-channel `/MSG TOKEN` flow | Operator UX promised in [Architecture § Authentication](Architecture.md#authentication). | Roadmap § Out of MVP scope |
-| Mass-op response that acts | Today the alarm only logs `warn`; auto-deop / lockdown is open work. | Roadmap § Out of MVP scope |
 | Cert revocation list / OCSP | Lost admin or node certs still require CA rotation. | v0.2 |
 | Formal external review | We've reviewed our own code; that is not the same thing. | When the project graduates beyond pre-alpha. |
