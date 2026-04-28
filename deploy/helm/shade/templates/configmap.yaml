@@ -1,0 +1,56 @@
+{{- /*
+Renders shade.toml for all replicas. Per-pod node.id is injected via the
+downward API as SHADE_NODE__ID=metadata.name; this ConfigMap doesn't set it.
+The mesh.peers list includes all replicas; the daemon's setup_mesh filters
+self out by comparing its node_id against each peer's address component.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "shade.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shade.labels" . | nindent 4 }}
+data:
+  shade.toml: |
+    [node]
+    # node.id is injected per-pod via SHADE_NODE__ID downward-API env var
+    data_dir = {{ .Values.node.dataDir | quote }}
+
+    [node.tls]
+    ca_bundle = {{ .Values.node.tls.caBundle | quote }}
+    cert      = {{ .Values.node.tls.cert | quote }}
+    key       = {{ .Values.node.tls.key | quote }}
+
+    [mesh]
+    listen  = {{ printf "0.0.0.0:%d" (.Values.mesh.listenPort | int) | quote }}
+    psk_env = {{ .Values.mesh.pskEnv | quote }}
+    peers   = {{ include "shade.meshPeers" . }}
+
+    [network]
+    name     = {{ .Values.network.name | quote }}
+    servers  = {{ toJson .Values.network.servers }}
+    tls      = {{ .Values.network.tls }}
+    nick     = {{ .Values.network.nick | quote }}
+    ident    = {{ .Values.network.ident | quote }}
+    realname = {{ .Values.network.realname | quote }}
+    channels = {{ toJson .Values.network.channels }}
+
+    [network.sasl]
+    mechanism = {{ .Values.network.sasl.mechanism | quote }}
+    {{- if .Values.network.sasl.username }}
+    username  = {{ .Values.network.sasl.username | quote }}
+    {{- end }}
+    # password is supplied via SHADE_SASL__PASSWORD env var from shade-secrets
+
+    [admin]
+    listen       = {{ printf "0.0.0.0:%d" (.Values.admin.listenPort | int) | quote }}
+    require_mtls = {{ .Values.admin.requireMtls }}
+    client_ca    = {{ .Values.admin.clientCa | quote }}
+
+    [metrics]
+    listen = {{ printf "0.0.0.0:%d" (.Values.metrics.listenPort | int) | quote }}
+
+    [logging]
+    level  = {{ .Values.logging.level | quote }}
+    format = {{ .Values.logging.format | quote }}

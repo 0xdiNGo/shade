@@ -1,0 +1,241 @@
+# Shade Helm chart values.
+#
+# Every setting maps to a daemon config key via SHADE_* env-var overlays or
+# the rendered shade.toml ConfigMap. Keys match shade.example.toml sections.
+# Override with --set or a custom values file.
+
+# -- Number of replicas. Shade is a StatefulSet; size by peer count, not load.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/0xdingo/shade
+  # -- Image tag. Defaults to chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# -- Optional list of imagePullSecrets for private registries.
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# Shade daemon config. These values are rendered into shade.toml via the
+# ConfigMap; see templates/configmap.yaml. Each pod overrides node.id from
+# the downward API (metadata.name).
+# ---------------------------------------------------------------------------
+
+node:
+  # -- Data directory inside the container. Must match the PVC mountPath.
+  dataDir: /var/lib/shade
+  tls:
+    # Paths inside the container; the shade-pki Secret is mounted here.
+    caBundle: /etc/shade/pki/botnet-ca.pem
+    cert: /etc/shade/pki/node.pem
+    key: /etc/shade/pki/node.key
+
+mesh:
+  # -- Port the mesh mTLS listener binds on.
+  listenPort: 7331
+  # -- Env-var name the daemon reads the PSK from.
+  pskEnv: SHADE_MESH_PSK
+
+network:
+  # -- Logical IRC network name (informational).
+  name: shade
+  # -- IRC server address(es). "host:port" strings.
+  servers:
+    - irc.example.com:6697
+  # -- Enable TLS toward the IRC server. Keep true in production.
+  tls: true
+  # -- Bot nick on IRC.
+  nick: shade
+  ident: shade
+  realname: Shade
+  # -- Channels to join on connect.
+  channels:
+    - "#shade"
+  # -- Optional SASL PLAIN credentials. Set password via the shade-secrets
+  #    Secret and reference it through SHADE_SASL__PASSWORD env-var, or
+  #    leave both blank to use SASL EXTERNAL (cert-based).
+  sasl:
+    mechanism: EXTERNAL   # PLAIN or EXTERNAL
+    username: ""          # Only for PLAIN; ignored for EXTERNAL.
+    # password comes from SHADE_SASL__PASSWORD (shade-secrets Secret)
+
+admin:
+  # -- Port the mTLS admin listener binds on.
+  listenPort: 8443
+  # -- Require mTLS for the admin API. Set false only for tests.
+  requireMtls: true
+  # -- Path to the CA that signs operator client certs.
+  clientCa: /etc/shade/pki/botnet-ca.pem
+  # -- Optional Ingress for the admin API. See ingress.yaml template comments
+  #    for guidance on TLS passthrough vs. re-encryption.
+  ingress:
+    enabled: false
+    className: ""
+    # -- Annotations to add to the Ingress. Useful for cert-manager, e.g.:
+    # annotations:
+    #   cert-manager.io/cluster-issuer: letsencrypt-prod
+    annotations: {}
+    hosts:
+      - host: shade-admin.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    # -- TLS configuration for the Ingress. cert-manager will provision the
+    #    cert if an issuer annotation is set above.
+    tls: []
+    #  - secretName: shade-admin-tls
+    #    hosts:
+    #      - shade-admin.example.com
+
+metrics:
+  # -- Port for /healthz, /readyz, and /metrics (plain HTTP, no certs).
+  listenPort: 9090
+
+logging:
+  level: info
+  format: json
+
+# ---------------------------------------------------------------------------
+# Kubernetes resource shapes
+# ---------------------------------------------------------------------------
+
+service:
+  # ClusterIP Service for the mTLS admin listener.
+  admin:
+    type: ClusterIP
+    port: 8443
+  # ClusterIP Service for the metrics/probes listener.
+  metrics:
+    type: ClusterIP
+    port: 9090
+
+# -- PVC template for /var/lib/shade (SQLite data dir). One volume per replica.
+persistence:
+  storageClass: ""   # "" uses the cluster default StorageClass
+  size: 1Gi
+  accessMode: ReadWriteOnce
+
+# ---------------------------------------------------------------------------
+# Probes — both use the plain-HTTP metrics listener (no cert required).
+# ---------------------------------------------------------------------------
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: metrics
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 6
+
+# ---------------------------------------------------------------------------
+# Resource requests/limits — intentionally left unset. Operators should size
+# for their cluster. Uncomment and tune.
+# ---------------------------------------------------------------------------
+
+resources: {}
+  # requests:
+  #   cpu: 100m
+  #   memory: 64Mi
+  # limits:
+  #   cpu: 500m
+  #   memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# Security context — distroless nonroot (UID 65532) with read-only rootfs.
+# ---------------------------------------------------------------------------
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# ---------------------------------------------------------------------------
+# Bootstrap Job — generates the mesh CA and per-node certs on first install.
+# Runs only if the shade-pki Secret does not already exist.
+# Set enabled: false if you manage PKI externally (e.g., cert-manager +
+# a custom issuer for SAN-based node certs).
+# ---------------------------------------------------------------------------
+
+bootstrapJob:
+  enabled: true
+  # -- kubectl image used by the Job to write Secrets.
+  kubectlImage: bitnami/kubectl:latest
+
+# ---------------------------------------------------------------------------
+# Optional: Prometheus Operator ServiceMonitor
+# ---------------------------------------------------------------------------
+
+serviceMonitor:
+  # -- Create a ServiceMonitor for Prometheus Operator. Requires the
+  #    prometheus.io/scrape CRD to be installed.
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  # -- Additional labels to attach to the ServiceMonitor (e.g., release: prom).
+  additionalLabels: {}
+
+# ---------------------------------------------------------------------------
+# Optional: NetworkPolicy
+# ---------------------------------------------------------------------------
+
+networkPolicy:
+  # -- Create a NetworkPolicy. Requires a CNI that enforces NetworkPolicies
+  #    (Calico, Cilium, Weave, etc.).
+  enabled: false
+  # -- CIDR or pod selectors allowed to reach the admin listener (:8443).
+  # adminIngress:
+  #   - podSelector:
+  #       matchLabels:
+  #         app: ingress-nginx
+  # -- CIDR or pod selectors allowed to reach Prometheus metrics (:9090).
+  # metricsIngress:
+  #   - podSelector:
+  #       matchLabels:
+  #         app: prometheus
+
+# -- Extra environment variables injected into each pod. Useful for
+#    SHADE_* overrides not covered by values.yaml.
+extraEnv: []
+# - name: SHADE_LOGGING__LEVEL
+#   value: debug
+
+# -- Extra volumes to mount into the pod.
+extraVolumes: []
+extraVolumeMounts: []
+
+# -- Node selector, tolerations, and affinity. Default to spreading replicas
+#    across nodes for availability.
+nodeSelector: {}
+
+tolerations: []
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels: {}  # filled by template using selectorLabels
+          topologyKey: kubernetes.io/hostname

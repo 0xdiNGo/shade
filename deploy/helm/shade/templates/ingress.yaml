@@ -1,0 +1,50 @@
+{{- if .Values.admin.ingress.enabled }}
+{{- /*
+Optional Ingress for the mTLS admin API.
+
+Shade's admin listener performs its own mTLS verification at the TLS layer.
+If your Ingress controller terminates TLS it will break client-cert
+forwarding. Use one of:
+  - SSL passthrough (nginx: nginx.ingress.kubernetes.io/ssl-passthrough: "true")
+  - A LoadBalancer with an external TLS passthrough rule
+  - Port-forward for internal-only access (recommended for small deployments)
+
+The annotations block below is a hook for cert-manager if you want the
+Ingress TLS cert managed externally (the cert presented to clients reaching
+the Ingress, not the mTLS material Shade uses internally).
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "shade.fullname" . }}-admin
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shade.labels" . | nindent 4 }}
+  {{- with .Values.admin.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.admin.ingress.className }}
+  ingressClassName: {{ .Values.admin.ingress.className }}
+  {{- end }}
+  {{- if .Values.admin.ingress.tls }}
+  tls:
+    {{- toYaml .Values.admin.ingress.tls | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.admin.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "shade.fullname" $ }}-admin
+                port:
+                  number: {{ $.Values.service.admin.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}

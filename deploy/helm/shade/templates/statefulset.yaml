@@ -1,0 +1,164 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "shade.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shade.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "shade.selectorLabels" . | nindent 6 }}
+  serviceName: {{ include "shade.fullname" . }}  # headless Service for stable DNS
+  podManagementPolicy: Parallel  # all pods start simultaneously; gossip handles ordering
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0
+  template:
+    metadata:
+      labels:
+        {{- include "shade.labels" . | nindent 8 }}
+      annotations:
+        # Roll pods when the ConfigMap changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        # The shade-pki Secret holds CA + per-replica node certs keyed
+        # as `botnet-ca.pem`, `shade-0.pem`/`shade-0.key`, `shade-1.…`,
+        # etc. Each pod needs its OWN cert mounted at /etc/shade/pki/
+        # because the mesh handshake binds the cert SAN to the claimed
+        # node_id (`shade_mesh::cert_node_id`). Pre-rolling the right
+        # files into an emptyDir at boot keeps the StatefulSet template
+        # uniform — no per-pod templating, no External Secrets dep,
+        # works on plain k3s out of the box.
+        - name: select-node-cert
+          image: busybox:stable
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              cp /pki-source/botnet-ca.pem /pki-out/botnet-ca.pem
+              cp /pki-source/${POD_NAME}.pem /pki-out/node.pem
+              cp /pki-source/${POD_NAME}.key /pki-out/node.key
+              chmod 0400 /pki-out/node.key /pki-out/node.pem
+              chmod 0444 /pki-out/botnet-ca.pem
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: pki-source
+              mountPath: /pki-source
+              readOnly: true
+            - name: pki
+              mountPath: /pki-out
+      containers:
+        - name: shade
+          image: {{ include "shade.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command: ["/shade", "run", "--config", "/etc/shade/shade.toml"]
+          ports:
+            - name: admin
+              containerPort: {{ .Values.admin.listenPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.metrics.listenPort }}
+              protocol: TCP
+            - name: mesh
+              containerPort: {{ .Values.mesh.listenPort }}
+              protocol: TCP
+          env:
+            # Inject the pod name as the node ID via the downward API.
+            - name: SHADE_NODE__ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            # Pulls in SHADE_MESH_PSK and SHADE_SASL__PASSWORD.
+            - secretRef:
+                name: {{ include "shade.secretsName" . }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/shade/shade.toml
+              subPath: shade.toml
+              readOnly: true
+            - name: pki
+              mountPath: /etc/shade/pki
+              readOnly: true
+            - name: data
+              mountPath: {{ .Values.node.dataDir }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "shade.fullname" . }}-config
+        # Per-replica cert lands here at boot via the init container.
+        - name: pki
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        # Source Secret with all replicas' certs; only the init
+        # container reads from it.
+        - name: pki-source
+          secret:
+            secretName: {{ include "shade.pkiSecretName" . }}
+            defaultMode: 0400
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "shade.selectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "shade.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - {{ .Values.persistence.accessMode }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

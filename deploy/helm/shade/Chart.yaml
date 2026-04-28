@@ -1,0 +1,18 @@
+apiVersion: v2
+name: shade
+description: Shade IRC bot and channel-management mesh
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - irc
+  - bot
+  - mesh
+home: https://github.com/0xdiNGo/shade
+sources:
+  - https://github.com/0xdiNGo/shade
+maintainers:
+  - name: 0xdiNGo
+    url: https://github.com/0xdiNGo
+annotations:
+  artifacthub.io/license: MIT
