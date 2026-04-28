@@ -102,15 +102,19 @@ pub async fn run(cfg: Config) -> Result<()> {
         shutdown.signal(),
     ));
 
-    let admin_router = shade_api::admin::router(AdminState {
-        readiness: readiness.clone(),
-    })
-    .merge(shade_api::v1::router(ApiState {
+    // /v1 lives behind the mTLS admin listener; /healthz, /readyz, and
+    // /metrics live on the plain-HTTP metrics listener so k8s liveness
+    // and readiness probes (and Prometheus scrapers) can reach them
+    // without an operator client cert.
+    let admin_router = shade_api::v1::router(ApiState {
         store: store.clone(),
         node_id: Arc::from(cfg.node.id.as_str()),
         mesh: mesh.clone(),
-    }));
-    let metrics_router = shade_api::metrics::router(metrics_handle);
+    });
+    let metrics_router =
+        shade_api::metrics::router(metrics_handle).merge(shade_api::admin::router(AdminState {
+            readiness: readiness.clone(),
+        }));
 
     let admin = spawn_admin_listener(&cfg, admin_router, shutdown.signal())?;
     let metrics = tokio::spawn(serve(
@@ -183,10 +187,15 @@ async fn setup_mesh(
             .map_err(|e| anyhow!("client TLS config: {e}"))?,
     );
 
-    let peers = cfg
+    // Filter self out of the dial list. Lets a single rendered config
+    // (e.g. one ConfigMap serving every replica of a k8s StatefulSet)
+    // list every node as a peer; each pod skips its own entry rather
+    // than looping back to itself.
+    let peers: Vec<MeshPeer> = cfg
         .mesh
         .peers
         .iter()
+        .filter(|p| p.node_id != cfg.node.id)
         .map(|p| MeshPeer {
             node_id: p.node_id.clone(),
             endpoint: p.endpoint,

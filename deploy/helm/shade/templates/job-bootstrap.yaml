@@ -1,0 +1,151 @@
+{{- /*
+Bootstrap Job — generates the mesh CA, per-node certs, and an admin client
+cert, then writes them into the shade-pki Secret.
+
+The Job is idempotent: it checks whether the shade-pki Secret already
+contains a non-empty botnet-ca.pem; if it does, it exits 0 immediately
+without regenerating any material. This means:
+  - First install: certs are generated and written.
+  - Upgrades: existing certs are preserved.
+  - Manual rotation: delete the shade-pki Secret and re-run the Job (or
+    run `helm upgrade` to create a new Job pod) to regenerate everything.
+
+Per-replica certs (shade-0 … shade-N) are generated in order; the node.pem
+and node.key in the Secret are for shade-0. Each other replica needs its own
+cert. For production deployments with >3 replicas, extend the loop below or
+manage PKI externally and set bootstrapJob.enabled: false.
+
+The admin cert (CN=admin, EKU=clientAuth) is placed in shade-pki as
+admin.pem and admin.key for initial operator access. Distribute these to
+operators via a secure channel and rotate regularly.
+*/ -}}
+{{- if .Values.bootstrapJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "shade.fullname" . }}-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shade.labels" . | nindent 4 }}
+  annotations:
+    # Re-run on upgrade so helm upgrade --install is safe.
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "shade.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bootstrap
+    spec:
+      serviceAccountName: {{ include "shade.fullname" . }}-bootstrap
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: false  # kubectl secret create needs root in the bitnami image
+      initContainers:
+        # Wait for the shade image to be pullable (proves the tag exists).
+        - name: shade-version
+          image: {{ include "shade.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/shade", "--version"]
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+      containers:
+        - name: bootstrap
+          image: {{ include "shade.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              PKI_SECRET="{{ include "shade.pkiSecretName" . }}"
+              NAMESPACE="{{ .Release.Namespace }}"
+              REPLICAS="{{ .Values.replicaCount }}"
+              FULLNAME="{{ include "shade.fullname" . }}"
+
+              # Check if certs already exist (idempotency guard).
+              EXISTING=$(kubectl get secret "$PKI_SECRET" -n "$NAMESPACE" \
+                -o jsonpath='{.data.botnet-ca\.pem}' 2>/dev/null || true)
+              if [ -n "$EXISTING" ] && [ "$EXISTING" != "" ]; then
+                echo "shade-pki Secret already populated — skipping cert generation."
+                exit 0
+              fi
+
+              echo "Generating botnet CA..."
+              /shade init-ca --out-dir /tmp/pki
+
+              echo "Generating per-node certs..."
+              i=0
+              while [ "$i" -lt "$REPLICAS" ]; do
+                NODE_ID="${FULLNAME}-${i}"
+                /shade issue-cert \
+                  --node-id "$NODE_ID" \
+                  --ca-dir  /tmp/pki \
+                  --out-dir /tmp/pki/nodes/${NODE_ID}
+                i=$((i + 1))
+              done
+
+              echo "Generating admin client cert..."
+              /shade issue-admin-cert \
+                --handle admin \
+                --ca-dir /tmp/pki \
+                --out-dir /tmp/pki/admin
+
+              echo "Writing shade-pki Secret..."
+              # Use node-0's cert as the default node.pem / node.key.
+              # Each node mounts the same Secret; node-specific certs are
+              # differentiated by node.pem/node.key per-node-named keys
+              # (e.g., shade-0.pem, shade-1.pem). The daemon reads node.pem
+              # and node.key by default; operators can patch the Secret with
+              # per-node material and use a projected-volume per-replica.
+              NODE0_ID="${FULLNAME}-0"
+              kubectl create secret generic "$PKI_SECRET" \
+                -n "$NAMESPACE" \
+                --from-file=botnet-ca.pem=/tmp/pki/botnet-ca.pem \
+                --from-file=node.pem=/tmp/pki/nodes/${NODE0_ID}/node.pem \
+                --from-file=node.key=/tmp/pki/nodes/${NODE0_ID}/node.key \
+                --from-file=admin-ca.pem=/tmp/pki/botnet-ca.pem \
+                --from-file=admin.pem=/tmp/pki/admin/admin.pem \
+                --from-file=admin.key=/tmp/pki/admin/admin.key \
+                --dry-run=client -o yaml | kubectl apply -f -
+
+              # Write per-node certs as additional keys in the same Secret.
+              i=1
+              while [ "$i" -lt "$REPLICAS" ]; do
+                NODE_ID="${FULLNAME}-${i}"
+                kubectl patch secret "$PKI_SECRET" -n "$NAMESPACE" \
+                  --type=json \
+                  -p "[
+                    {\"op\":\"replace\",\"path\":\"/data/${NODE_ID}.pem\",\"value\":\"$(base64 -w0 /tmp/pki/nodes/${NODE_ID}/node.pem)\"},
+                    {\"op\":\"replace\",\"path\":\"/data/${NODE_ID}.key\",\"value\":\"$(base64 -w0 /tmp/pki/nodes/${NODE_ID}/node.key)\"}
+                  ]" 2>/dev/null || \
+                kubectl patch secret "$PKI_SECRET" -n "$NAMESPACE" \
+                  --type=merge \
+                  -p "{\"data\":{\"${NODE_ID}.pem\":\"$(base64 -w0 /tmp/pki/nodes/${NODE_ID}/node.pem)\",\"${NODE_ID}.key\":\"$(base64 -w0 /tmp/pki/nodes/${NODE_ID}/node.key)\"}}"
+                i=$((i + 1))
+              done
+
+              echo "Bootstrap complete. Retrieve the admin cert:"
+              echo "  kubectl get secret $PKI_SECRET -n $NAMESPACE -o jsonpath='{.data.admin\\.pem}' | base64 -d > admin.pem"
+              echo "  kubectl get secret $PKI_SECRET -n $NAMESPACE -o jsonpath='{.data.admin\\.key}' | base64 -d > admin.key"
+          securityContext:
+            readOnlyRootFilesystem: false  # writes to /tmp/pki
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
