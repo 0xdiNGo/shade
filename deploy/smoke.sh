@@ -7,7 +7,11 @@
 
 set -euo pipefail
 
+# /v1 admin surface lives on the (require_mtls=false) admin listener;
+# /healthz, /readyz, /metrics live on the plain-HTTP probes/metrics
+# listener (k8s-friendly — probes don't require an operator cert).
 ADMIN="http://127.0.0.1:8443"
+PROBES="http://127.0.0.1:9090"
 ERGO_PORT=6667
 
 cd "$(dirname "$0")"
@@ -22,17 +26,17 @@ docker compose up --build -d
 
 echo ">>> waiting for /healthz"
 deadline=$((SECONDS + 60))
-until curl -sf "$ADMIN/healthz" >/dev/null; do
+until curl -sf "$PROBES/healthz" >/dev/null; do
   [[ $SECONDS -lt $deadline ]] || { echo "FAIL: /healthz did not come up"; docker compose logs; exit 1; }
   sleep 1
 done
 
 echo ">>> waiting for irc_connected=true on /readyz (mesh stays single-node — peers_up=false is expected)"
 deadline=$((SECONDS + 60))
-until curl -s "$ADMIN/readyz" | grep -q '"irc_connected":true'; do
+until curl -s "$PROBES/readyz" | grep -q '"irc_connected":true'; do
   [[ $SECONDS -lt $deadline ]] || {
     echo "FAIL: /readyz never showed irc_connected=true"
-    curl -s "$ADMIN/readyz"
+    curl -s "$PROBES/readyz"
     docker compose logs shade | tail -50
     exit 1
   }
