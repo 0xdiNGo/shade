@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 mod admin_tls;
+mod backup;
 mod cli;
 mod commands;
 mod config;

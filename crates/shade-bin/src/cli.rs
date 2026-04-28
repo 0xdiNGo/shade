@@ -129,6 +129,37 @@ pub enum Command {
         #[command(flatten)]
         client: ClientArgs,
     },
+
+    /// Create an online backup of the SQLite store.
+    ///
+    /// Uses the rusqlite online backup API — safe to run while the daemon is
+    /// live. Verifies the output with `PRAGMA integrity_check` before
+    /// reporting success.
+    ///
+    /// If `--out` is omitted the backup is written as raw bytes to stdout.
+    /// If `--out` is a directory the file is named `shade-<utc-iso8601>.db`.
+    Backup {
+        /// Destination file or directory. Omit to write raw bytes to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
+    /// Restore the SQLite store from a backup file.
+    ///
+    /// Refuses to run if `<data_dir>/shade.db` already exists unless
+    /// `--force` is supplied. On Unix, also refuses if another process holds
+    /// an exclusive lock on the destination (i.e. the daemon is running).
+    ///
+    /// After copying the file atomically, runs `shade migrate` automatically
+    /// to bring the schema up to date.
+    Restore {
+        /// Source backup file (required).
+        #[arg(long)]
+        from: PathBuf,
+        /// Overwrite the existing database without confirmation.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Common options for any subcommand that talks to the admin API.

@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
+use crate::backup;
 use crate::cli::{Cli, Command};
 use crate::config::Config;
 use crate::daemon;
@@ -45,6 +46,8 @@ pub fn dispatch(cli: &Cli) -> Result<()> {
             password_stdin,
             client,
         } => shadectl::login(handle, *password_stdin, client, &cli.config),
+        Command::Backup { out } => cmd_backup(out.as_deref(), &cli.config),
+        Command::Restore { from, force } => cmd_restore(from, *force, &cli.config),
     }
 }
 
@@ -99,4 +102,21 @@ fn check_config(config_path: &Path) -> Result<()> {
 
 fn dump_state(_config: &Path) -> Result<()> {
     bail!("`shade dump-state` is not yet implemented")
+}
+
+fn cmd_backup(out: Option<&Path>, config_path: &Path) -> Result<()> {
+    let cfg =
+        Config::load(config_path).with_context(|| format!("loading {}", config_path.display()))?;
+    let db_path = shade_store::db_path_in(&cfg.node.data_dir);
+    backup::run_backup(&db_path, out)
+}
+
+fn cmd_restore(from: &Path, force: bool, config_path: &Path) -> Result<()> {
+    let cfg =
+        Config::load(config_path).with_context(|| format!("loading {}", config_path.display()))?;
+    std::fs::create_dir_all(&cfg.node.data_dir)
+        .with_context(|| format!("creating {}", cfg.node.data_dir.display()))?;
+    let db_path = shade_store::db_path_in(&cfg.node.data_dir);
+    backup::run_restore(from, &db_path, force)?;
+    Ok(())
 }

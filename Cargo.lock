@@ -2144,6 +2144,7 @@ dependencies = [
  "hyper-util",
  "pem",
  "rcgen",
+ "rusqlite",
  "rustls",
  "serde",
  "serde_json",
