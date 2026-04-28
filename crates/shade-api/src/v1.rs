@@ -29,8 +29,19 @@ use shade_core::{
 use shade_mesh::MeshHub;
 use shade_proto::{Delete, DeleteKind, Upsert, UpsertKind};
 use shade_store::Store;
+use tower_governor::governor::GovernorConfigBuilder;
+use tower_governor::key_extractor::SmartIpKeyExtractor;
+use tower_governor::GovernorLayer;
 
 use crate::auth::ActorClaim;
+
+/// Maximum login attempts allowed in the sliding window before 429 is returned.
+const LOGIN_RATE_LIMIT_BURST: u32 = 10;
+
+/// Width of the replenishment period in seconds. One token is added every
+/// `LOGIN_RATE_LIMIT_PERIOD_SECS` seconds, up to `LOGIN_RATE_LIMIT_BURST`.
+/// At 10 burst / 6-second refill the window is effectively 10 per 60 seconds.
+const LOGIN_RATE_LIMIT_PERIOD_SECS: u64 = 6;
 
 /// Shared state for the admin API.
 #[derive(Clone)]
@@ -74,10 +85,30 @@ impl ApiState {
     }
 }
 
-/// Build the `/v1/...` admin router.
+/// Build the `/v1/...` admin router with per-source-IP rate limiting on
+/// `POST /v1/login` (10 attempts per 60 seconds).
 pub fn router(state: ApiState) -> Router {
-    Router::new()
+    let login_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(SmartIpKeyExtractor)
+            .per_second(LOGIN_RATE_LIMIT_PERIOD_SECS)
+            .burst_size(LOGIN_RATE_LIMIT_BURST)
+            .finish()
+            .expect("login rate-limit config is valid"),
+    );
+
+    let login_router = Router::new()
         .route("/v1/login", axum::routing::post(login))
+        .layer(GovernorLayer {
+            config: login_governor,
+        })
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::bearer_auth_middleware,
+        ))
+        .with_state(state.clone());
+
+    let api_router = Router::new()
         .route("/v1/users", get(list_users).post(create_user))
         .route(
             "/v1/users/:handle",
@@ -110,7 +141,9 @@ pub fn router(state: ApiState) -> Router {
             state.clone(),
             crate::auth::bearer_auth_middleware,
         ))
-        .with_state(state)
+        .with_state(state);
+
+    login_router.merge(api_router)
 }
 
 // ----- error type ---------------------------------------------------------
@@ -869,6 +902,20 @@ mod tests {
             .unwrap()
     }
 
+    /// Like [`req_json`] but includes an `X-Forwarded-For` header so that
+    /// `SmartIpKeyExtractor` can resolve the source IP. Required for any
+    /// request sent to `POST /v1/login`, which is wrapped by the governor
+    /// layer.
+    fn req_login(ip: &str, body: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/login")
+            .header("content-type", "application/json")
+            .header("x-forwarded-for", ip)
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn create_user_then_get() {
         let state = fresh_state();
@@ -1142,9 +1189,8 @@ mod tests {
         // Login.
         let resp = app
             .clone()
-            .oneshot(req_json(
-                "POST",
-                "/v1/login",
+            .oneshot(req_login(
+                "127.0.0.1",
                 &serde_json::json!({ "handle": "alice", "password": "hunter2" }),
             ))
             .await
@@ -1213,9 +1259,8 @@ mod tests {
             .unwrap();
 
         let resp = app
-            .oneshot(req_json(
-                "POST",
-                "/v1/login",
+            .oneshot(req_login(
+                "127.0.0.1",
                 &serde_json::json!({ "handle": "alice", "password": "wrong" }),
             ))
             .await
@@ -1238,9 +1283,8 @@ mod tests {
             .unwrap();
 
         let resp = app
-            .oneshot(req_json(
-                "POST",
-                "/v1/login",
+            .oneshot(req_login(
+                "127.0.0.1",
                 &serde_json::json!({ "handle": "alice", "password": "anything" }),
             ))
             .await
@@ -1304,13 +1348,209 @@ mod tests {
 
         // Login should now fail.
         let resp = app
-            .oneshot(req_json(
-                "POST",
-                "/v1/login",
+            .oneshot(req_login(
+                "127.0.0.1",
                 &serde_json::json!({ "handle": "alice", "password": "secret" }),
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ----- per-source-IP login rate limit ----------------------------------
+
+    /// A burst of `LOGIN_RATE_LIMIT_BURST` attempts from one IP all pass
+    /// through the governor, and the very next attempt (over the limit)
+    /// returns 429 Too Many Requests with an `x-ratelimit-after` header.
+    ///
+    /// We use a user with *no* password so credential verification is a
+    /// fast, constant-time `Unauthorized` path — no Argon2id hashing.
+    /// Running 10 Argon2id verifications in series would take several
+    /// seconds, causing the governor's refill clock to add a token back
+    /// before we hit request 11, making the assertion flaky.
+    #[tokio::test]
+    async fn login_rate_limit_429_on_overflow() {
+        let state = fresh_state();
+        let app = router(state.clone());
+
+        // User with no password → login handler returns 401 quickly.
+        let _ = app
+            .clone()
+            .oneshot(req_json(
+                "POST",
+                "/v1/users",
+                &serde_json::json!({ "handle": "alice" }),
+            ))
+            .await
+            .unwrap();
+
+        let ip = "10.0.0.1";
+        let login_body = serde_json::json!({ "handle": "alice", "password": "any" });
+
+        // Exhaust the burst allowance (LOGIN_RATE_LIMIT_BURST = 10).
+        for i in 0..LOGIN_RATE_LIMIT_BURST {
+            let resp = app
+                .clone()
+                .oneshot(req_login(ip, &login_body))
+                .await
+                .unwrap();
+            assert_ne!(
+                resp.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "attempt {} should be allowed but got 429",
+                i + 1
+            );
+        }
+
+        // The 11th attempt must be rate-limited.
+        let resp = app
+            .clone()
+            .oneshot(req_login(ip, &login_body))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "11th attempt from same IP should be rate-limited"
+        );
+        // governor sets `x-ratelimit-after` on 429.
+        assert!(
+            resp.headers().contains_key("x-ratelimit-after"),
+            "429 response must include x-ratelimit-after header"
+        );
+    }
+
+    /// Two different source IPs each have their own bucket; exhausting one
+    /// does not affect the other.
+    #[tokio::test]
+    async fn login_rate_limit_is_per_ip() {
+        let state = fresh_state();
+        let app = router(state.clone());
+
+        let _ = app
+            .clone()
+            .oneshot(req_json(
+                "POST",
+                "/v1/users",
+                &serde_json::json!({ "handle": "alice" }),
+            ))
+            .await
+            .unwrap();
+
+        let ip_a = "10.1.0.1";
+        let ip_b = "10.2.0.2";
+        let login_body = serde_json::json!({ "handle": "alice", "password": "wrong" });
+
+        // Exhaust IP A's bucket.
+        for _ in 0..LOGIN_RATE_LIMIT_BURST {
+            let _ = app
+                .clone()
+                .oneshot(req_login(ip_a, &login_body))
+                .await
+                .unwrap();
+        }
+
+        // IP A is now over limit.
+        let resp_a = app
+            .clone()
+            .oneshot(req_login(ip_a, &login_body))
+            .await
+            .unwrap();
+        assert_eq!(resp_a.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // IP B still has its own fresh bucket — must not be rate-limited.
+        let resp_b = app
+            .clone()
+            .oneshot(req_login(ip_b, &login_body))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp_b.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "IP B should have its own bucket, independent of IP A"
+        );
+    }
+
+    /// Once a window expires the same IP can attempt again.
+    ///
+    /// This test uses a short-period (1 burst, 50 ms refill) governor built
+    /// inline so the window resets in well under a second without affecting
+    /// the production constants.
+    #[tokio::test]
+    async fn login_rate_limit_resets_after_window() {
+        let state = fresh_state();
+
+        // Build a minimal router with burst=1, period=50ms so the window
+        // resets quickly without sleeping for 6 seconds.
+        let governor_cfg = Arc::new(
+            GovernorConfigBuilder::default()
+                .key_extractor(SmartIpKeyExtractor)
+                .per_millisecond(50)
+                .burst_size(1)
+                .finish()
+                .expect("test governor config"),
+        );
+        let login_router = Router::new()
+            .route("/v1/login", axum::routing::post(login))
+            .layer(GovernorLayer {
+                config: governor_cfg,
+            })
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::auth::bearer_auth_middleware,
+            ))
+            .with_state(state.clone());
+
+        let _ = login_router
+            .clone()
+            .oneshot(req_json(
+                "POST",
+                "/v1/users",
+                &serde_json::json!({ "handle": "alice" }),
+            ))
+            .await
+            .unwrap();
+
+        let ip = "10.3.0.1";
+        let body = serde_json::json!({ "handle": "alice", "password": "any" });
+
+        // First request uses the single burst token — allowed.
+        let resp1 = login_router
+            .clone()
+            .oneshot(req_login(ip, &body))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp1.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "first request must pass"
+        );
+
+        // Second request immediately — no token yet, rate limited.
+        let resp2 = login_router
+            .clone()
+            .oneshot(req_login(ip, &body))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp2.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "second immediate request must be 429"
+        );
+
+        // Wait for the window to reset (period=50ms; sleep comfortably longer).
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+
+        // After the window resets, the IP can attempt again.
+        let resp3 = login_router
+            .clone()
+            .oneshot(req_login(ip, &body))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp3.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "after window reset the IP should be allowed again"
+        );
     }
 }
