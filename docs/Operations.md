@@ -146,6 +146,23 @@ The full variable reference is in [`ansible/README.md`](../ansible/README.md). M
 
 ### Operator runbooks
 
+#### Verifying a signed release
+
+Every image pushed to `ghcr.io/0xdingo/shade` on a `v*` tag push is signed with cosign keyless (GitHub OIDC) and has an SBOM attached as an in-toto attestation. No managed keys are involved; the signing identity is bound to the release workflow.
+
+```sh
+# Verify the image signature.
+cosign verify ghcr.io/0xdingo/shade:v0.1.0 \
+  --certificate-identity-regexp 'https://github.com/0xdiNGo/shade/.github/workflows/release.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# Pull the SBOM attestation and inspect the predicate.
+cosign download attestation ghcr.io/0xdingo/shade:v0.1.0 \
+  | jq -r '.payload' | base64 -d | jq '.predicate'
+```
+
+`cosign verify` exits non-zero if the signature is invalid, the signing identity does not match, or the OIDC issuer differs — safe to use as a gate in deployment automation. The SBOM predicate is CycloneDX JSON; pipe it into `cyclonedx-cli` or any CycloneDX-aware tool for component analysis.
+
 #### Cert rotation
 
 When a node's cert is approaching expiry (or has been compromised):
