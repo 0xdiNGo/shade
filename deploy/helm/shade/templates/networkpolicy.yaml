@@ -1,0 +1,55 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+NetworkPolicy for Shade pods.
+Requires a NetworkPolicy-enforcing CNI (Calico, Cilium, Weave, etc.).
+
+Egress is intentionally left open — Shade dials out to the IRC server and
+to peer Shade pods over mesh. Restrict egress via additional policies if
+required by your security posture.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "shade.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shade.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "shade.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # --- Admin mTLS listener (:8443) ---
+    # Allow the admin Ingress controller and any explicitly listed sources.
+    - ports:
+        - port: {{ .Values.admin.listenPort }}
+          protocol: TCP
+      {{- if .Values.networkPolicy.adminIngress }}
+      from:
+        {{- toYaml .Values.networkPolicy.adminIngress | nindent 8 }}
+      {{- end }}
+
+    # --- Mesh gossip listener (:7331) ---
+    # Allow other Shade pods in the same namespace to reach the mesh port.
+    - ports:
+        - port: {{ .Values.mesh.listenPort }}
+          protocol: TCP
+      from:
+        - podSelector:
+            matchLabels:
+              {{- include "shade.selectorLabels" . | nindent 14 }}
+
+    # --- Metrics + probes listener (:9090) ---
+    # Allow Prometheus pods and the kubelet (for liveness/readiness probes).
+    # Kubelet probes originate from node IP space; allow all sources on this
+    # port unless you can restrict by node CIDR.
+    - ports:
+        - port: {{ .Values.metrics.listenPort }}
+          protocol: TCP
+      {{- if .Values.networkPolicy.metricsIngress }}
+      from:
+        {{- toYaml .Values.networkPolicy.metricsIngress | nindent 8 }}
+      {{- end }}
+{{- end }}

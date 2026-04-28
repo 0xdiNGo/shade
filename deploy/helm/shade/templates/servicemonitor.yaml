@@ -1,0 +1,29 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{- /*
+ServiceMonitor for Prometheus Operator.
+Requires monitoring.coreos.com/v1 CRD (kube-prometheus-stack or prometheus-operator).
+Scrapes the plain-HTTP metrics listener (:9090/metrics) — no certs required.
+*/ -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "shade.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shade.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "shade.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+{{- end }}

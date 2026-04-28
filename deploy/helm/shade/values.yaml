@@ -70,6 +70,26 @@ admin:
   requireMtls: true
   # -- Path to the CA that signs operator client certs.
   clientCa: /etc/shade/pki/botnet-ca.pem
+  # -- Optional Ingress for the admin API. See ingress.yaml template comments
+  #    for guidance on TLS passthrough vs. re-encryption.
+  ingress:
+    enabled: false
+    className: ""
+    # -- Annotations to add to the Ingress. Useful for cert-manager, e.g.:
+    # annotations:
+    #   cert-manager.io/cluster-issuer: letsencrypt-prod
+    annotations: {}
+    hosts:
+      - host: shade-admin.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    # -- TLS configuration for the Ingress. cert-manager will provision the
+    #    cert if an issuer annotation is set above.
+    tls: []
+    #  - secretName: shade-admin-tls
+    #    hosts:
+    #      - shade-admin.example.com
 
 metrics:
   # -- Port for /healthz, /readyz, and /metrics (plain HTTP, no certs).
@@ -194,32 +214,6 @@ networkPolicy:
   #   - podSelector:
   #       matchLabels:
   #         app: prometheus
-
-# ---------------------------------------------------------------------------
-# Optional: Ingress for the admin API (:8443)
-# Shade's admin listener expects mTLS; you'll need a passthrough or mTLS
-# re-encryption configuration in your Ingress controller.
-# ---------------------------------------------------------------------------
-
-admin:
-  ingress:
-    enabled: false
-    className: ""
-    # -- Annotations to add to the Ingress. Useful for cert-manager, e.g.:
-    # annotations:
-    #   cert-manager.io/cluster-issuer: letsencrypt-prod
-    annotations: {}
-    hosts:
-      - host: shade-admin.example.com
-        paths:
-          - path: /
-            pathType: Prefix
-    # -- TLS configuration for the Ingress. cert-manager will provision the
-    #    cert if an issuer annotation is set above.
-    tls: []
-    #  - secretName: shade-admin-tls
-    #    hosts:
-    #      - shade-admin.example.com
 
 # -- Extra environment variables injected into each pod. Useful for
 #    SHADE_* overrides not covered by values.yaml.

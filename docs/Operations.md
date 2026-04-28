@@ -123,6 +123,112 @@ Restart `shade run`. The daemon will detect the PEM trio and bring the mesh onli
 
 For multi-node tests today, copy `botnet-ca.pem` to every node, run `issue-cert` on the side that holds the CA key, and rsync the resulting `node.pem` + `node.key` to the target node.
 
+### Deploying with k3s + Helm (Tier-1)
+
+The chart at [`deploy/helm/shade/`](../deploy/helm/shade/) is the primary
+deployment model. It targets k3s and any CNCF-conformant cluster.
+
+#### Prerequisites
+
+Helm 3.10+, kubectl 1.27+, a running Kubernetes cluster. For metrics:
+Prometheus Operator (for `serviceMonitor.enabled`). For network isolation: a
+NetworkPolicy-enforcing CNI (Calico, Cilium, Weave).
+
+#### Install
+
+```sh
+# 1. Create the namespace and env-vars Secret.
+kubectl create namespace shade
+kubectl create secret generic shade-secrets \
+  -n shade \
+  --from-literal=SHADE_MESH_PSK="$(head -c 48 /dev/urandom | base64)" \
+  --from-literal=SHADE_SASL__PASSWORD=""   # leave empty for SASL EXTERNAL
+
+# 2. Install. The post-install bootstrap Job generates mesh CA + node certs.
+helm install shade ./deploy/helm/shade/ \
+  -n shade \
+  --set network.servers[0]="irc.example.com:6697" \
+  --set network.nick="shade" \
+  --set "network.channels[0]=#shade"
+
+# 3. Wait for the bootstrap Job, then watch the pods.
+kubectl -n shade wait --for=condition=complete \
+  job/shade-shade-bootstrap --timeout=120s
+kubectl -n shade get pods -w
+
+# 4. Verify readiness.
+kubectl -n shade port-forward svc/shade-shade-metrics 9090
+curl http://localhost:9090/readyz
+# → {"ok":true, "irc_connected":true, "peers_up":true, "store_open":true}
+```
+
+#### Retrieve the initial admin cert
+
+```sh
+kubectl get secret shade-shade-pki -n shade \
+  -o jsonpath='{.data.admin\.pem}' | base64 -d > admin.pem
+kubectl get secret shade-shade-pki -n shade \
+  -o jsonpath='{.data.admin\.key}' | base64 -d > admin.key
+# Distribute admin.pem + admin.key to operators over a secure channel.
+```
+
+#### Upgrade
+
+```sh
+helm upgrade shade ./deploy/helm/shade/ -n shade
+```
+
+The bootstrap Job skips cert generation if `shade-pki` already contains a
+non-empty CA — upgrades are safe. For cert rotation: delete the
+`shade-shade-pki` Secret and run `helm upgrade` to trigger a new bootstrap
+pass, or patch the Secret directly with new PEMs.
+
+#### Helm values
+
+Full values reference in [`deploy/helm/shade/README.md`](../deploy/helm/shade/README.md).
+Key overrides:
+
+| Override | Effect |
+|----------|--------|
+| `--set replicaCount=5` | Scale to 5 mesh peers |
+| `--set serviceMonitor.enabled=true` | Enable Prometheus Operator scraping |
+| `--set networkPolicy.enabled=true` | Apply CNI-enforced NetworkPolicy |
+| `--set admin.ingress.enabled=true` | Expose admin API via Ingress |
+| `--set bootstrapJob.enabled=false` | Skip bootstrap (manage PKI externally) |
+
+#### PKI rotation (Helm)
+
+```sh
+# Delete the existing pki Secret and re-run helm upgrade to regenerate.
+kubectl delete secret shade-shade-pki -n shade
+helm upgrade shade ./deploy/helm/shade/ -n shade
+kubectl -n shade wait --for=condition=complete \
+  job/shade-shade-bootstrap --timeout=120s
+# Trigger a rolling restart so pods pick up the new certs.
+kubectl -n shade rollout restart statefulset/shade-shade
+```
+
+#### Mesh PSK rotation (Helm)
+
+```sh
+# Regenerate the env-vars Secret, then rolling-restart.
+kubectl create secret generic shade-secrets \
+  -n shade \
+  --from-literal=SHADE_MESH_PSK="$(head -c 48 /dev/urandom | base64)" \
+  --from-literal=SHADE_SASL__PASSWORD="" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n shade rollout restart statefulset/shade-shade
+```
+
+There's a brief window during the rolling restart where some pods have the
+old PSK and some have the new — cookie verification degrades for ≤ 60 s per
+node bounce. The mesh stays connected throughout (mTLS is independent of the
+PSK).
+
+### Alternative: Deploying with Ansible + Podman + systemd (Tier-2)
+
+The role at [`ansible/roles/shade`](../ansible/roles/shade) deploys Shade as a Podman-managed container under a `Type=notify` systemd unit on each node. Use this path when Kubernetes is not available or when the target nodes are bare-metal VMs managed by Ansible.
+
 ### Deploying with Ansible (M6)
 
 The role at [`ansible/roles/shade`](../ansible/roles/shade) deploys Shade as a Podman-managed container under a `Type=notify` systemd unit on each node.

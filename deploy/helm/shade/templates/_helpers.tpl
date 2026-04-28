@@ -70,7 +70,7 @@ The daemon's setup_mesh self-filters the local node_id.
 {{- $count := .Values.replicaCount | int }}
 {{- $peers := list }}
 {{- range $i := until $count }}
-{{- $peers = append $peers (printf "%s-%d.%s.%s.svc.cluster.local:%d" $fullname $i $fullname $ns $port) }}
+{{- $peers = append $peers (printf "%s-%d.%s.%s.svc.cluster.local:%v" $fullname $i $fullname $ns $port) }}
 {{- end }}
 {{- toJson $peers }}
 {{- end }}
