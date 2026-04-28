@@ -363,6 +363,77 @@ ansible-playbook -i hosts.ini playbooks/deploy.yml --serial 1
 
 There's a brief window during the rolling rotation where some nodes have the old PSK and some have the new — cookies minted on one side fail verification on the other. Plan for ≤ 60 seconds of degraded cookie verification per node bounce; the mesh stays connected throughout (mTLS is independent of the PSK).
 
+#### Backup + restore
+
+Shade ships two CLI subcommands for snapshot-based backup and recovery. Both work while the daemon is running; the backup API uses SQLite's online backup API (WAL-safe, no writers blocked). Encryption of the output is out of scope — wrap with `age`/`borg`/`sops` if needed.
+
+##### Manual one-off backup
+
+```sh
+# Backup to an explicit path.
+shade backup --out /var/backups/shade/shade-$(date +%Y%m%d).db
+
+# Backup to a directory; file is auto-named shade-<utc-iso8601>.db.
+shade backup --out /var/backups/shade/
+
+# Backup to stdout (binary) — useful for piping into a remote store.
+shade backup | aws s3 cp - s3://mybackets/shade/shade-$(date +%Y%m%d).db
+```
+
+The command verifies the output with `PRAGMA integrity_check` before printing `ok: backed up <N> bytes to <path>`. If the check fails, the file is left in place for inspection.
+
+##### Cron pattern — every 6 hours, retain 7 days
+
+```sh
+cat > /etc/cron.d/shade-backup << 'EOF'
+0 */6 * * * shade shade backup --out /var/backups/shade/ >/dev/null
+EOF
+
+# Prune backups older than 7 days (run once daily is fine).
+cat >> /etc/cron.d/shade-backup << 'EOF'
+30 3 * * * shade find /var/backups/shade/ -name 'shade-*.db' -mtime +7 -delete
+EOF
+```
+
+##### Restore from a snapshot
+
+```sh
+# Stop the daemon first — restore refuses if the database is locked.
+systemctl stop shade
+
+# Restore from a specific snapshot.
+shade restore --from /var/backups/shade/shade-20250427T120000Z.db
+
+# If shade.db already exists, pass --force to overwrite it.
+shade restore --from /var/backups/shade/shade-20250427T120000Z.db --force
+
+# Bring the daemon back up.
+systemctl start shade
+```
+
+`shade restore` also accepts a backup that predates the current binary — it runs `shade migrate` automatically after copying the file, so the schema is always brought up to date. The output line reports the number of migrations applied:
+
+```
+ok: restored 131072 bytes from shade-20250427T120000Z.db; applied 0 migration(s)
+```
+
+##### Recovery from a bad migration
+
+If a migration corrupts the database (shouldn't happen with refinery's forward-only model, but defensive operations are still good):
+
+```sh
+systemctl stop shade
+
+# Find the most recent pre-migration backup.
+ls -lt /var/backups/shade/
+
+# Restore it (the --force flag overwrites the corrupted shade.db).
+shade restore --from /var/backups/shade/shade-<stamp>.db --force
+# shade migrate runs automatically and prints applied migration count.
+
+systemctl start shade
+```
+
 #### Drain a node before maintenance
 
 ```sh
