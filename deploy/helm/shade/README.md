@@ -92,20 +92,30 @@ curl --cert admin.pem --key admin.key \
      https://localhost:8443/v1/users
 ```
 
-## Per-node cert note
+## Per-node cert distribution
 
-The bootstrap Job places `shade-0`'s cert in the shared `shade-pki` Secret as
-`node.pem` / `node.key`. Replicas 1…N have their certs stored as
-`<release>-shade-N.pem` / `<release>-shade-N.key` in the same Secret.
+Shade's mesh handshake binds each peer's cert SAN to the `node_id` it
+claims in `PeerHello` (`shade_mesh::cert_node_id`); a connection where
+`cert SAN != claimed node_id` is dropped. So every pod must present
+its own cert, not a shared one.
 
-The default StatefulSet mounts the same Secret to all pods, so every pod
-reads `node.pem` / `node.key` — which is the shade-0 cert. For strict
-per-node TLS identity (where the mesh verifies that the SAN matches the
-connecting peer's declared node_id), mount per-node cert material using a
-projected volume or an External Secrets Operator `ExternalSecret` per pod.
-This is a known limitation of the single-Secret approach; it's safe for
-initial deployment because the CA is self-signed and the cert is used only
-for mTLS session establishment, not for node_id binding.
+The bootstrap Job mints one cert per replica and stores them in a
+single `shade-pki` Secret keyed by pod name (`shade-0.pem`,
+`shade-0.key`, `shade-1.pem`, `shade-1.key`, …) plus the shared
+`botnet-ca.pem`.
+
+The StatefulSet runs an `initContainer` (`select-node-cert`) that
+copies the right `<POD_NAME>.pem` / `<POD_NAME>.key` plus the CA into
+a per-pod `emptyDir` mounted at `/etc/shade/pki/{node.pem, node.key,
+botnet-ca.pem}`. The main `shade` container sees only its own cert;
+the source Secret is read-only and only mounted in the init
+container.
+
+Operationally this means every pod has the right identity for the
+mesh handshake without per-pod templating, External Secrets Operator,
+or projected-volume contortions. Cert rotation: delete the
+`shade-pki` Secret and re-run the Job (or `helm upgrade
+--force-recreate-pods`).
 
 ## Values reference
 

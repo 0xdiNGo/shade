@@ -30,6 +30,40 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        # The shade-pki Secret holds CA + per-replica node certs keyed
+        # as `botnet-ca.pem`, `shade-0.pem`/`shade-0.key`, `shade-1.…`,
+        # etc. Each pod needs its OWN cert mounted at /etc/shade/pki/
+        # because the mesh handshake binds the cert SAN to the claimed
+        # node_id (`shade_mesh::cert_node_id`). Pre-rolling the right
+        # files into an emptyDir at boot keeps the StatefulSet template
+        # uniform — no per-pod templating, no External Secrets dep,
+        # works on plain k3s out of the box.
+        - name: select-node-cert
+          image: busybox:stable
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              cp /pki-source/botnet-ca.pem /pki-out/botnet-ca.pem
+              cp /pki-source/${POD_NAME}.pem /pki-out/node.pem
+              cp /pki-source/${POD_NAME}.key /pki-out/node.key
+              chmod 0400 /pki-out/node.key /pki-out/node.pem
+              chmod 0444 /pki-out/botnet-ca.pem
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: pki-source
+              mountPath: /pki-source
+              readOnly: true
+            - name: pki
+              mountPath: /pki-out
       containers:
         - name: shade
           image: {{ include "shade.image" . }}
@@ -83,7 +117,14 @@ spec:
         - name: config
           configMap:
             name: {{ include "shade.fullname" . }}-config
+        # Per-replica cert lands here at boot via the init container.
         - name: pki
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        # Source Secret with all replicas' certs; only the init
+        # container reads from it.
+        - name: pki-source
           secret:
             secretName: {{ include "shade.pkiSecretName" . }}
             defaultMode: 0400
